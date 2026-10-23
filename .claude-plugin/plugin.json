@@ -1,6 +1,6 @@
 {
   "name": "task-tracker",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, a session summary, URLs under test and links to what was created, subagents with their results",
   "keywords": ["panel", "topics", "tracker", "agents"],
   "types": "./types/index.d.ts",
