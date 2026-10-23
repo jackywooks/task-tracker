@@ -62,6 +62,8 @@ declare module 'claude-code' {
       created: SessionLink[]
       merges: SessionLink[]
       changes: LocalChange[]
+      flipped: string[]
+      copied: string
     }
   }
 }

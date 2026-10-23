@@ -13,6 +13,10 @@ A Claude Code plugin that keeps a **side pane recording the current session**: w
 - **Topics**: one card per thing worked on this session, sorted 👉 doing / ❓ needs you / ⏳ waiting on others / ⬜ todo / ✅ done. Collapsed it is one line (title + where it stands); expanded it shows: now, background, decided, outputs (GitHub links are clickable and shown as `repo#123`), pending, asks, and the subagents launched for that topic.
 - **Agents**: a subagent you launch is filed under the current topic (marked "now"); while running it shows elapsed time and tool-call count, and once finished you can expand the result summary Claude wrote. Agents without a topic are listed under "Other agents".
 
+Session-level sections (Awaiting merge, Summary, Testing, Created, Local changes) fold: click the header (`▾` / `▸`) to collapse or expand; the header keeps showing the item count, e.g. `Local changes (7)`. Local changes starts folded, the others start open; the choice is kept in the session state (reset by `/clear`). Needs you and the topic cards are unchanged.
+
+In **Created**, every row has a `⧉ copy` button that puts `label — url` on the clipboard, and the header has `⧉ copy all`, which copies every entry as a Markdown list (`- [label](url)`, one per line). The button briefly shows `✓ Copied` (or `✗ Copy failed` when no clipboard was reachable, e.g. a remote surface). Copying uses the host's `$.ui.copy` (the terminal's clipboard tool / OSC 52).
+
 Session-level sections (Summary, Testing, Created) belong to the whole session, not to a topic, and are hidden while empty. Top to bottom: Needs you, Awaiting merge, Summary, Testing, Created, Local changes, Topics, Other agents.
 
 The pane opens by itself the first time it has content; reopen it with `/tracker`.
@@ -87,4 +91,5 @@ task-tracker 是 Claude Code 插件：在对话旁边放一个「事项总览」
 - 一个待定问题一张卡；计划步骤用代号时，凡出现代号都写「代号 名称」，计划类话题要有总览卡列出全部步骤「代号 名称：状态」。
 - `/compact` 保留面板并把内容交给摘要；`/clear` 清空；新会话从空开始；只放本会话的事。
 - 会话级三块（与「话题」同级、为空不显示）：「总结」（几行，做成了什么、还差什么）、「测试中」（正在测的 URL，可点）、「已创建」（本会话建的 issue / PR / 页面链接，可点）；由工具 `set_session` 写入，`showSummary` 可关总结。另有「等合并」（本会话开出、等你合的 PR，紧贴「等你」下方）与「本机改动」（会话后仍留在本机的定时任务 / 环境变量 / 账号 / 部署 / memory 等，临时 worktree / 分支 / 测试 session / 临时目录标「待清理」）。面板顺序：等你、等合并、总结、测试中、已创建、本机改动、话题。`/compact` 一并交给摘要，`/clear` 清空。
+- 会话级区块（等合并、总结、测试中、已创建、本机改动）点标题（`▾` / `▸`）可收起 / 展开，标题后始终显示条数（如「本机改动 (7)」）；「本机改动」默认收起，其余默认展开；状态存在会话 state，`/clear` 重置；「等你」和话题卡片不变。「已创建」每行有「⧉ 复制」按钮（复制 `label — url`），标题处有「⧉ 全部复制」（每行 `- [label](url)` 的 Markdown 列表）；复制后短暂显示「✓ 已复制」。
 - License：MIT。
