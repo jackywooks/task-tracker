@@ -1,6 +1,6 @@
 {
   "name": "task-tracker",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, a session summary, URLs under test and links to what was created, subagents with their results",
   "keywords": ["panel", "topics", "tracker", "agents"],
   "types": "./types/index.d.ts",
@@ -35,6 +35,13 @@
       "title": "Show session summary",
       "description": "Show the session summary section (written by Claude with set_session) on the pane.",
       "default": true
+    },
+    "copyFormat": {
+      "type": "string",
+      "title": "Copy format for Created links",
+      "description": "rich: a real hyperlink on the clipboard (HTML + plain text, written through the OS), falling back to Markdown if that fails; markdown: [label](url) text; plain: label and url as text.",
+      "options": ["rich", "markdown", "plain"],
+      "default": "rich"
     }
   }
 }
