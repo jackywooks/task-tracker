@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, ToolCallResult } from 'claude-code'
+import type { Register, RenderChildren, ToolCallResult } from 'claude-code'
 
 import type { AgentRun, AgentRunStatus, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
 
@@ -18,6 +18,11 @@ const testing = atom({ plugin: 'task-tracker', key: 'testing' } as const, [])
 const created = atom({ plugin: 'task-tracker', key: 'created' } as const, [])
 const merges = atom({ plugin: 'task-tracker', key: 'merges' } as const, [])
 const changes = atom({ plugin: 'task-tracker', key: 'changes' } as const, [])
+// Section ids the person flipped away from their default (Local changes defaults to folded, the rest to open)
+const flipped = atom({ plugin: 'task-tracker', key: 'flipped' } as const, [])
+const copied = atom({ plugin: 'task-tracker', key: 'copied' } as const, '')
+
+const FOLDED_BY_DEFAULT = ['changes']
 
 const AGENT_KEEP = 20
 
@@ -238,6 +243,10 @@ const LABELS = {
     created: 'Created',
     merges: 'Awaiting merge',
     changes: 'Local changes',
+    copy: 'copy',
+    copyAll: 'copy all',
+    copiedMark: 'Copied',
+    copyFailed: 'Copy failed',
     cleanup: 'CLEAN UP',
     sessionUpdated: (t: number, c: number, m: number, k: number) =>
       `Session updated; ${t} testing, ${c} created, ${m} awaiting merge, ${k} local change(s)`,
@@ -270,6 +279,10 @@ const LABELS = {
     created: '已创建',
     merges: '等合并',
     changes: '本机改动',
+    copy: '复制',
+    copyAll: '全部复制',
+    copiedMark: '已复制',
+    copyFailed: '复制失败',
     cleanup: '待清理',
     sessionUpdated: (t: number, c: number, m: number, k: number) =>
       `会话信息已更新；测试中 ${t} 条，已创建 ${c} 条，等合并 ${m} 条，本机改动 ${k} 条`,
@@ -470,6 +483,8 @@ export const register: Register = (on, options) => {
         await update($, topics, () => [])
         await update($, agents, () => [])
         await update($, expanded, () => [])
+        await update($, flipped, () => [])
+        await update($, copied, () => '')
         await update($, now, () => '')
         await update($, summary, () => '')
         await update($, testing, () => [])
@@ -652,10 +667,24 @@ export const register: Register = (on, options) => {
     const createdList = await read($, created)
     const mergeList = await read($, merges)
     const changeList = await read($, changes)
+    const flips = await read($, flipped)
+    const copiedKey = await read($, copied)
     const clock = Date.now()
 
     const toggle = (id: string) => () =>
       update($, expanded, ids => (ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]))
+    const isFolded = (id: string) => FOLDED_BY_DEFAULT.includes(id) !== flips.includes(id)
+    const flip = (id: string) => () =>
+      update($, flipped, ids => (ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]))
+    const copyText = (key: string, text: string) => async (press: { surface: string }) => {
+      const res = await $.ui.copy({ text, surface: press.surface as never })
+      await update($, copied, () => (res.isCopied ? key : `!${key}`))
+      $.clock.after(1500, () => {
+        void update($, copied, cur => (cur === key || cur === `!${key}` ? '' : cur))
+      })
+    }
+    const copyMark = (key: string) =>
+      copiedKey === key ? ` ✓ ${L.copiedMark}` : copiedKey === `!${key}` ? ` ✗ ${L.copyFailed}` : ''
     const reveal = (id: string) => () => update($, expanded, ids => (ids.includes(id) ? ids : [...ids, id]))
 
     const rich = (text: string, color?: string) => (
@@ -674,6 +703,18 @@ export const register: Register = (on, options) => {
         <Text color="claude" bold>
           ━ {label} ({count})
         </Text>
+      </Box>
+    )
+    // Session-level section header: click to fold; the count stays visible; extra is an optional action button
+    const fold = (id: string, label: string, count: number, extra?: RenderChildren) => (
+      <Box marginTop={1} flexDirection="row">
+        <Button
+          key={`fold-${id}`}
+          plain
+          label={`${isFolded(id) ? '▸' : '▾'} ━ ${label} (${count})`}
+          onPress={flip(id)}
+        />
+        {extra}
       </Box>
     )
     const group = (label: string, color: string, lines: string[] | undefined, mark = '• ') =>
@@ -749,8 +790,8 @@ export const register: Register = (on, options) => {
           </Box>
         ))}
 
-        {mergeList.length > 0 && section(L.merges, mergeList.length)}
-        {mergeList.map(item => {
+        {mergeList.length > 0 && fold('merges', L.merges, mergeList.length)}
+        {(isFolded('merges') ? [] : mergeList).map(item => {
           const owner = item.topic !== undefined ? list.find(x => x.id === item.topic) : undefined
           return (
             <Box key={`merge-${item.url}`} flexDirection="row">
@@ -765,17 +806,11 @@ export const register: Register = (on, options) => {
           )
         })}
 
-        {showSummary && sessionSummary !== '' && (
-          <Box marginTop={1}>
-            <Text color="claude" bold>
-              ━ {L.summary}
-            </Text>
-          </Box>
-        )}
-        {showSummary && sessionSummary !== '' && rich(sessionSummary)}
+        {showSummary && sessionSummary !== '' && fold('summary', L.summary, sessionSummary.split('\n').filter(x => x.trim() !== '').length)}
+        {showSummary && sessionSummary !== '' && !isFolded('summary') && rich(sessionSummary)}
 
-        {testingList.length > 0 && section(L.testing, testingList.length)}
-        {testingList.map(item => (
+        {testingList.length > 0 && fold('testing', L.testing, testingList.length)}
+        {(isFolded('testing') ? [] : testingList).map(item => (
           <Box key={`testing-${item.url}`} flexDirection="row">
             <Text color="warning">🧪 </Text>
             <Box flexShrink={1}>
@@ -787,8 +822,22 @@ export const register: Register = (on, options) => {
           </Box>
         ))}
 
-        {createdList.length > 0 && section(L.created, createdList.length)}
-        {createdList.map(item => (
+        {createdList.length > 0 &&
+          fold(
+            'created',
+            L.created,
+            createdList.length,
+            !isFolded('created') && (
+              <Button
+                key="copy-created-all"
+                plain
+                dimColor
+                label={` ⧉ ${L.copyAll}${copyMark('created-all')}`}
+                onPress={copyText('created-all', createdList.map(i => `- [${clean(i.label)}](${i.url})`).join('\n'))}
+              />
+            ),
+          )}
+        {(isFolded('created') ? [] : createdList).map(item => (
           <Box key={`created-${item.url}`} flexDirection="row">
             <Text color="success">• </Text>
             <Box flexShrink={1}>
@@ -797,11 +846,18 @@ export const register: Register = (on, options) => {
                 <Link href={item.url}>{clean(item.label)}</Link>
               </Text>
             </Box>
+            <Button
+              key={`copy-created-${item.url}`}
+              plain
+              dimColor
+              label={` ⧉ ${L.copy}${copyMark(`created-${item.url}`)}`}
+              onPress={copyText(`created-${item.url}`, `${clean(item.label)} — ${item.url}`)}
+            />
           </Box>
         ))}
 
-        {changeList.length > 0 && section(L.changes, changeList.length)}
-        {changeList.map(item => (
+        {changeList.length > 0 && fold('changes', L.changes, changeList.length)}
+        {(isFolded('changes') ? [] : changeList).map(item => (
           <Box key={`change-${item.label}`} flexDirection="row">
             <Text color={item.cleanup ? 'warning' : 'subtle'}>{item.cleanup ? '🧹 ' : '• '}</Text>
             <Box flexShrink={1}>
