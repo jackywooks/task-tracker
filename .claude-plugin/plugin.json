@@ -1,7 +1,7 @@
 {
   "name": "task-tracker",
-  "version": "0.3.0",
-  "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, subagents with their results",
+  "version": "0.4.0",
+  "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, a session summary, URLs under test and links to what was created, subagents with their results",
   "keywords": ["panel", "topics", "tracker", "agents"],
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -28,6 +28,12 @@
       "type": "boolean",
       "title": "Show questions on top",
       "description": "Collect every open question for you in a \"Needs you\" section at the top of the pane.",
+      "default": true
+    },
+    "showSummary": {
+      "type": "boolean",
+      "title": "Show session summary",
+      "description": "Show the session summary section (written by Claude with set_session) on the pane.",
       "default": true
     }
   }

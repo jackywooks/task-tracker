@@ -1,17 +1,23 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, ToolCallResult } from 'claude-code'
 
-import type { AgentRun, AgentRunStatus, Topic, TopicStatus } from '../types'
+import type { AgentRun, AgentRunStatus, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
 
 const PANE = 'task-tracker'
 const TOPICS_TOOL: string = 'mcp__task-tracker__set_topics'
 const SUMMARY_TOOL: string = 'mcp__task-tracker__set_agent_summary'
+const SESSION_TOOL: string = 'mcp__task-tracker__set_session'
 
 const topics = atom({ plugin: 'task-tracker', key: 'topics' } as const, [])
 const now = atom({ plugin: 'task-tracker', key: 'now' } as const, '')
 const updatedAt = atom({ plugin: 'task-tracker', key: 'updatedAt' } as const, '')
 const expanded = atom({ plugin: 'task-tracker', key: 'expanded' } as const, [])
 const agents = atom({ plugin: 'task-tracker', key: 'agents' } as const, [])
+const summary = atom({ plugin: 'task-tracker', key: 'summary' } as const, '')
+const testing = atom({ plugin: 'task-tracker', key: 'testing' } as const, [])
+const created = atom({ plugin: 'task-tracker', key: 'created' } as const, [])
+const merges = atom({ plugin: 'task-tracker', key: 'merges' } as const, [])
+const changes = atom({ plugin: 'task-tracker', key: 'changes' } as const, [])
 
 const AGENT_KEEP = 20
 
@@ -90,6 +96,54 @@ function strings(raw: unknown): string[] | undefined {
   return list
 }
 
+function toLink(raw: unknown): SessionLink | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const url = typeof o.url === 'string' ? o.url.trim() : ''
+  if (url === '') return undefined
+  const label = typeof o.label === 'string' && o.label.trim() !== '' ? o.label.trim() : shortUrl(url)
+  const link: SessionLink = { label, url }
+  if (typeof o.note === 'string' && o.note.trim() !== '') link.note = o.note.trim()
+  if (typeof o.kind === 'string' && o.kind.trim() !== '') link.kind = o.kind.trim()
+  if (typeof o.topic === 'string' && o.topic.trim() !== '') link.topic = o.topic.trim()
+  return link
+}
+
+// Merge by url: a repeated url replaces the old entry in place (so re-labelling works), new ones go last
+function mergeLinks(list: SessionLink[], raw: unknown, remove: string[]): SessionLink[] {
+  const incoming = (Array.isArray(raw) ? raw : []).map(toLink).filter((x): x is SessionLink => x !== undefined)
+  const next = [...list]
+  for (const link of incoming) {
+    const at = next.findIndex(one => one.url === link.url)
+    if (at < 0) next.push(link)
+    else next[at] = link
+  }
+  return next.filter(one => !remove.includes(one.url))
+}
+
+function toChange(raw: unknown): LocalChange | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const label = typeof o.label === 'string' ? o.label.trim() : ''
+  if (label === '') return undefined
+  const change: LocalChange = { label }
+  if (typeof o.detail === 'string' && o.detail.trim() !== '') change.detail = o.detail.trim()
+  if (o.cleanup === true) change.cleanup = true
+  return change
+}
+
+// Merge by label: a repeated label replaces the old entry in place
+function mergeChanges(list: LocalChange[], raw: unknown, remove: string[]): LocalChange[] {
+  const incoming = (Array.isArray(raw) ? raw : []).map(toChange).filter((x): x is LocalChange => x !== undefined)
+  const next = [...list]
+  for (const change of incoming) {
+    const at = next.findIndex(one => one.label === change.label)
+    if (at < 0) next.push(change)
+    else next[at] = change
+  }
+  return next.filter(one => !remove.includes(one.label))
+}
+
 function toTopic(raw: unknown): Topic | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const o = raw as Record<string, unknown>
@@ -134,9 +188,14 @@ function merge(list: Topic[], incoming: Topic[], raw: Record<string, unknown>[])
 }
 
 // On /compact, hand the board to the summary so the compacted conversation still has the topic record
-function boardText(title: string, list: Topic[], runs: AgentRun[]): string {
+function boardText(
+  title: string,
+  list: Topic[],
+  runs: AgentRun[],
+  session: { summary: string; testing: SessionLink[]; created: SessionLink[]; merges: SessionLink[]; changes: LocalChange[] },
+): string {
   const lines = [
-    `[${title} pane (task-tracker)] This is the record of this session's topics; the pane survives compaction. In the summary, keep every topic below in full: status, what was decided, outputs and what is left. Before continuing, align with it, and update it with set_topics when things change.`,
+    `[${title} pane (task-tracker)] This is the record of this session's topics; the pane survives compaction. In the summary, keep every topic below in full: status, what was decided, outputs and what is left. Before continuing, align with it, and update it with set_topics / set_session when things change.`,
   ]
   for (const t of list) {
     lines.push(`- [${t.id}] ${t.title} (${t.status})${t.line ? `: ${t.line}` : ''}`)
@@ -148,6 +207,13 @@ function boardText(title: string, list: Topic[], runs: AgentRun[]): string {
     for (const run of runs.filter(r => r.topic === t.id && r.summary?.length)) {
       lines.push(`  agent "${run.description}": ${(run.summary ?? []).join('; ')}`)
     }
+  }
+  if (session.summary !== '') lines.push(`Session summary: ${session.summary}`)
+  for (const t of session.testing) lines.push(`Testing: ${t.label} ${t.url}${t.note ? ` (${t.note})` : ''}`)
+  for (const c of session.created) lines.push(`Created${c.kind ? ` ${c.kind}` : ''}: ${c.label} ${c.url}`)
+  for (const m of session.merges) lines.push(`Awaiting merge: ${m.label} ${m.url}${m.topic ? ` (topic ${m.topic})` : ''}`)
+  for (const c of session.changes) {
+    lines.push(`Local change${c.cleanup ? ' (to clean up)' : ''}: ${c.label}${c.detail ? ` - ${c.detail}` : ''}`)
   }
   return lines.join('\n')
 }
@@ -167,6 +233,14 @@ const LABELS = {
     empty: 'No topics yet.',
     needsYou: 'Needs you',
     topics: 'Topics',
+    summary: 'Summary',
+    testing: 'Testing',
+    created: 'Created',
+    merges: 'Awaiting merge',
+    changes: 'Local changes',
+    cleanup: 'CLEAN UP',
+    sessionUpdated: (t: number, c: number, m: number, k: number) =>
+      `Session updated; ${t} testing, ${c} created, ${m} awaiting merge, ${k} local change(s)`,
     otherAgents: 'Other agents',
     now: '  <- now',
     line: 'Now ',
@@ -191,6 +265,14 @@ const LABELS = {
     empty: '还没有话题。',
     needsYou: '等你',
     topics: '话题',
+    summary: '总结',
+    testing: '测试中',
+    created: '已创建',
+    merges: '等合并',
+    changes: '本机改动',
+    cleanup: '待清理',
+    sessionUpdated: (t: number, c: number, m: number, k: number) =>
+      `会话信息已更新；测试中 ${t} 条，已创建 ${c} 条，等合并 ${m} 条，本机改动 ${k} 条`,
     otherAgents: '其他 Agent',
     now: '  ← 现在',
     line: '现在 ',
@@ -207,6 +289,7 @@ export const register: Register = (on, options) => {
   const TITLE = typeof options.title === 'string' && options.title.trim() !== '' ? options.title.trim() : 'Task Tracker'
   const L = options.uiLanguage === 'zh' ? LABELS.zh : LABELS.en
   const asksOnTop = options.asksOnTop !== false
+  const showSummary = options.showSummary !== false
   const language = typeof options.language === 'string' ? options.language.trim() : ''
   const writeIn = language !== '' ? language : 'the language the user converses in (follow the user)'
 
@@ -278,6 +361,74 @@ export const register: Register = (on, options) => {
       },
       isDeferred: false,
     })
+    await $.tool.register({
+      name: 'set_session',
+      description:
+        `Keep the session-level part of the "${TITLE}" side pane: what belongs to the whole session rather than to one topic. ` +
+        'Shown as separate sections next to the topics. ' +
+        'summary: short text (a few lines) on where the session stands: what got done and what is still left; when given it replaces the old one, so rewrite it as the session moves on. ' +
+        'testing[]: URLs the user is asked to test right now ({label, url, note?}); whenever you start a preview or test environment for the user to try, add its URL, and remove it (remove_urls) once testing is over. ' +
+        'created[]: links to things created in this session ({label, url, kind?} with kind such as issue, pr, page); whenever you create an issue, PR or page, add its full URL right after. ' +
+        'merges[]: pull requests opened in this session that still wait for the user to merge ({label, url, topic?} with topic the id of the owning topic); add one when you open a PR, and remove it (remove_urls) once the user says it is merged. ' +
+        'changes[]: changes left on the user\'s machine that outlive the session ({label, detail?, cleanup?}): a registered scheduled task, an environment variable set, an account or credential switched, a deployed service (detail: version or commit), a memory written, and so on; ' +
+        'record one whenever you make such a change, set cleanup: true on temporary leftovers that still have to be cleaned up (temporary worktree or branch, test session, temporary directory) so they stand out, and remove the entry (remove_labels) once it is cleaned up or no longer applies. ' +
+        'testing, created and merges entries merge by url, changes entries by label (a repeat replaces the old entry); remove_urls[] deletes entries from testing, created and merges; remove_labels[] deletes entries from changes. ' +
+        'Pass only what changed. ' +
+        `Write labels, notes and the summary in ${writeIn}, each line short; never use circled digits.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string', description: 'Session summary; replaces the old one' },
+          testing: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { label: { type: 'string' }, url: { type: 'string' }, note: { type: 'string' } },
+              required: ['url'],
+            },
+          },
+          created: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' },
+                url: { type: 'string' },
+                kind: { type: 'string', description: 'e.g. issue, pr, page' },
+              },
+              required: ['url'],
+            },
+          },
+          merges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' },
+                url: { type: 'string' },
+                topic: { type: 'string', description: 'Id of the owning topic' },
+              },
+              required: ['url'],
+            },
+          },
+          changes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' },
+                detail: { type: 'string' },
+                cleanup: { type: 'boolean', description: 'true: still to be cleaned up' },
+              },
+              required: ['label'],
+            },
+          },
+          remove_urls: { type: 'array', items: { type: 'string' }, description: 'URLs to delete from testing, created and merges' },
+          remove_labels: { type: 'array', items: { type: 'string' }, description: 'Labels to delete from changes' },
+        },
+      },
+      isDeferred: false,
+    })
     await $.command.register({ name: 'tracker', description: `Open the "${TITLE}" pane` })
 
     return next(e)
@@ -294,8 +445,18 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     try {
       const list = await read($, topics)
-      if (list.length === 0) return next(e)
-      const text = boardText(TITLE, list, await read($, agents))
+      const session = {
+        summary: await read($, summary),
+        testing: await read($, testing),
+        created: await read($, created),
+        merges: await read($, merges),
+        changes: await read($, changes),
+      }
+      const hasSession =
+        session.summary !== '' ||
+        session.testing.length + session.created.length + session.merges.length + session.changes.length > 0
+      if (list.length === 0 && !hasSession) return next(e)
+      const text = boardText(TITLE, list, await read($, agents), session)
       return next({ ...e, instructions: [e.instructions, text].filter(Boolean).join('\n\n') })
     } catch {
       return next(e)
@@ -310,6 +471,11 @@ export const register: Register = (on, options) => {
         await update($, agents, () => [])
         await update($, expanded, () => [])
         await update($, now, () => '')
+        await update($, summary, () => '')
+        await update($, testing, () => [])
+        await update($, created, () => [])
+        await update($, merges, () => [])
+        await update($, changes, () => [])
         await update($, updatedAt, () => '')
       } catch {
         // display only
@@ -403,6 +569,51 @@ export const register: Register = (on, options) => {
     return { result: L.recorded(matched, points.length) }
   })
 
+  on('tool.call', { tool: SESSION_TOOL }, async ($, e): Promise<ToolCallResult> => {
+    const input = e as unknown as {
+      summary?: unknown
+      testing?: unknown
+      created?: unknown
+      merges?: unknown
+      changes?: unknown
+      remove_urls?: unknown
+      remove_labels?: unknown
+    }
+    const remove = strings(input.remove_urls) ?? []
+    const removeLabels = strings(input.remove_labels) ?? []
+    const clock = new Date()
+    const stamp = `${String(clock.getHours()).padStart(2, '0')}:${String(clock.getMinutes()).padStart(2, '0')}`
+    if (typeof input.summary === 'string') await update($, summary, () => (input.summary as string).trim())
+    let t = 0
+    let c = 0
+    let m = 0
+    let k = 0
+    await update($, testing, list => {
+      const next = mergeLinks(list, input.testing, remove)
+      t = next.length
+      return next
+    })
+    await update($, created, list => {
+      const next = mergeLinks(list, input.created, remove)
+      c = next.length
+      return next
+    })
+    await update($, merges, list => {
+      const next = mergeLinks(list, input.merges, remove)
+      m = next.length
+      return next
+    })
+    await update($, changes, list => {
+      const next = mergeChanges(list, input.changes, removeLabels)
+      k = next.length
+      return next
+    })
+    await update($, updatedAt, () => stamp)
+    void $.ui.open({ id: PANE, title: TITLE })
+
+    return { result: L.sessionUpdated(t, c, m, k) }
+  })
+
   on('tool.call', { tool: TOPICS_TOOL }, async ($, e): Promise<ToolCallResult> => {
     const input = e as unknown as { topics?: unknown; now?: unknown; remove?: unknown }
     const raw = Array.isArray(input.topics)
@@ -436,6 +647,11 @@ export const register: Register = (on, options) => {
     const stamp = await read($, updatedAt)
     const open = await read($, expanded)
     const runs = await read($, agents)
+    const sessionSummary = await read($, summary)
+    const testingList = await read($, testing)
+    const createdList = await read($, created)
+    const mergeList = await read($, merges)
+    const changeList = await read($, changes)
     const clock = Date.now()
 
     const toggle = (id: string) => () =>
@@ -514,7 +730,9 @@ export const register: Register = (on, options) => {
           {L.stats(list.length, done)}
           {stamp ? L.updatedAt(stamp) : ''}
         </Text>
-        {list.length === 0 && <Text dimColor>{L.empty}</Text>}
+        {list.length === 0 && sessionSummary === '' && testingList.length + createdList.length + mergeList.length + changeList.length === 0 && (
+          <Text dimColor>{L.empty}</Text>
+        )}
 
         {asksOnTop && asks.length > 0 && section(L.needsYou, asks.length)}
         {(asksOnTop ? asks : []).map(({ topic, ask }, i) => (
@@ -528,6 +746,71 @@ export const register: Register = (on, options) => {
             <Text dimColor>
               {'    '}← {topic.id}. {topic.title}
             </Text>
+          </Box>
+        ))}
+
+        {mergeList.length > 0 && section(L.merges, mergeList.length)}
+        {mergeList.map(item => {
+          const owner = item.topic !== undefined ? list.find(x => x.id === item.topic) : undefined
+          return (
+            <Box key={`merge-${item.url}`} flexDirection="row">
+              <Text color="warning">⏳ </Text>
+              <Box flexShrink={1}>
+                <Text>
+                  <Link href={item.url}>{clean(item.label)}</Link>
+                  {owner ? ` · ← ${owner.id}. ${clean(owner.title)}` : ''}
+                </Text>
+              </Box>
+            </Box>
+          )
+        })}
+
+        {showSummary && sessionSummary !== '' && (
+          <Box marginTop={1}>
+            <Text color="claude" bold>
+              ━ {L.summary}
+            </Text>
+          </Box>
+        )}
+        {showSummary && sessionSummary !== '' && rich(sessionSummary)}
+
+        {testingList.length > 0 && section(L.testing, testingList.length)}
+        {testingList.map(item => (
+          <Box key={`testing-${item.url}`} flexDirection="row">
+            <Text color="warning">🧪 </Text>
+            <Box flexShrink={1}>
+              <Text>
+                <Link href={item.url}>{clean(item.label)}</Link>
+                {item.note ? ` · ${clean(item.note)}` : ''}
+              </Text>
+            </Box>
+          </Box>
+        ))}
+
+        {createdList.length > 0 && section(L.created, createdList.length)}
+        {createdList.map(item => (
+          <Box key={`created-${item.url}`} flexDirection="row">
+            <Text color="success">• </Text>
+            <Box flexShrink={1}>
+              <Text>
+                {item.kind ? `${item.kind} · ` : ''}
+                <Link href={item.url}>{clean(item.label)}</Link>
+              </Text>
+            </Box>
+          </Box>
+        ))}
+
+        {changeList.length > 0 && section(L.changes, changeList.length)}
+        {changeList.map(item => (
+          <Box key={`change-${item.label}`} flexDirection="row">
+            <Text color={item.cleanup ? 'warning' : 'subtle'}>{item.cleanup ? '🧹 ' : '• '}</Text>
+            <Box flexShrink={1}>
+              <Text>
+                {item.cleanup ? <Text color="warning" bold>[{L.cleanup}] </Text> : ''}
+                {clean(item.label)}
+                {item.detail ? ` · ${clean(item.detail)}` : ''}
+              </Text>
+            </Box>
           </Box>
         ))}
 

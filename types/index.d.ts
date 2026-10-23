@@ -14,6 +14,22 @@ export type Topic = {
   asks?: string[]
 }
 
+// A link kept at session level: a URL under test (note) or something created this session (kind: issue / pr / page ...)
+export type SessionLink = {
+  label: string
+  url: string
+  note?: string
+  kind?: string
+  topic?: string
+}
+
+// A change left on this machine that outlives the session; cleanup marks one that still has to be cleaned up
+export type LocalChange = {
+  label: string
+  detail?: string
+  cleanup?: boolean
+}
+
 export type AgentRunStatus = 'running' | 'done' | 'aborted' | 'error'
 
 export type AgentRun = {
@@ -41,6 +57,11 @@ declare module 'claude-code' {
       updatedAt: string
       expanded: string[]
       agents: AgentRun[]
+      summary: string
+      testing: SessionLink[]
+      created: SessionLink[]
+      merges: SessionLink[]
+      changes: LocalChange[]
     }
   }
 }

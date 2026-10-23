@@ -5,8 +5,15 @@ A Claude Code plugin that keeps a **side pane recording the current session**: w
 ## What the pane shows
 
 - **Needs you** (pinned on top): every open question across all cards, each tagged with its card. Click one to expand that card. Can be turned off (see Configuration).
+- **Awaiting merge** (right below Needs you): pull requests opened this session that still wait for you to merge, clickable, tagged with their topic when one is given. Claude adds one when it opens a PR and removes it once you say it is merged.
+- **Summary**: a few lines on where the session stands (what got done, what is left), rewritten by Claude as work moves on. Can be turned off (`showSummary`).
+- **Testing**: URLs you are asked to test right now (preview or test environments), clickable, each with an optional note. Removed once testing is over.
+- **Created**: links to things created this session (issues, PRs, pages), clickable.
+- **Local changes**: changes left on your machine that outlive the session: a registered scheduled task, an environment variable, a switched account, a deployed service (with version), a written memory. Temporary leftovers (worktree, branch, test session, temp directory) are flagged `CLEAN UP` and removed once cleaned.
 - **Topics**: one card per thing worked on this session, sorted 👉 doing / ❓ needs you / ⏳ waiting on others / ⬜ todo / ✅ done. Collapsed it is one line (title + where it stands); expanded it shows: now, background, decided, outputs (GitHub links are clickable and shown as `repo#123`), pending, asks, and the subagents launched for that topic.
 - **Agents**: a subagent you launch is filed under the current topic (marked "now"); while running it shows elapsed time and tool-call count, and once finished you can expand the result summary Claude wrote. Agents without a topic are listed under "Other agents".
+
+Session-level sections (Summary, Testing, Created) belong to the whole session, not to a topic, and are hidden while empty. Top to bottom: Needs you, Awaiting merge, Summary, Testing, Created, Local changes, Topics, Other agents.
 
 The pane opens by itself the first time it has content; reopen it with `/tracker`.
 
@@ -14,8 +21,8 @@ The pane opens by itself the first time it has content; reopen it with `/tracker
 
 | When | Pane |
 |---|---|
-| `/compact` (manual or automatic) | kept, and the whole topic record is handed to the compaction summary so Claude realigns with it afterwards |
-| `/clear` | emptied, new work starts |
+| `/compact` (manual or automatic) | kept, and the whole record (topics, summary, testing, created, awaiting merge, local changes) is handed to the compaction summary so Claude realigns with it afterwards |
+| `/clear` | emptied (topics, agents, summary, testing, created, awaiting merge, local changes), new work starts |
 | New session | starts empty (data lives in the session state) |
 
 Only this session's work belongs on the pane. Put follow-ups that outlive the session in your own project's tracker.
@@ -40,6 +47,7 @@ Set when installing, or later in `/config` (each field is a row there):
 | `language` | empty | Language Claude writes the cards in, e.g. `Simplified Chinese`. Empty follows the language of the conversation. |
 | `uiLanguage` | `en` | Language of the fixed pane labels: `en` or `zh`. |
 | `asksOnTop` | `true` | Show the "Needs you" section on top. |
+| `showSummary` | `true` | Show the session Summary section. |
 
 ## Tools Claude uses
 
@@ -47,6 +55,7 @@ Set when installing, or later in `/config` (each field is a row there):
 |---|---|
 | `mcp__task-tracker__set_topics` | Merge-update cards by `id`: pass only the topics that changed and only the changed fields (an empty array clears a field). Fields: `title`, `status` (doing, waiting, blocked, todo, done), `line`, `background`, `decided[]`, `outputs[]`, `pending[]`, `asks[]`; plus `now` (id of the current topic) and `remove` (delete cards). |
 | `mcp__task-tracker__set_agent_summary` | After a subagent finishes and its report is read, record what it delivered (2-5 points); can re-file it under another topic with `topic`. |
+| `mcp__task-tracker__set_session` | Session-level record: `summary` (text, replaces the old one), `testing[]` (`{label, url, note?}`, URLs under test), `created[]` (`{label, url, kind?}`, issues / PRs / pages created), `merges[]` (`{label, url, topic?}`, PRs awaiting your merge), all merged by `url`; `changes[]` (`{label, detail?, cleanup?}`, local changes) merged by `label`; `remove_urls[]` / `remove_labels[]` delete entries. Claude is told to add a link right after creating an issue / PR / page, to add a PR to `merges` when it opens it and remove it when you merge, to list a preview URL while you test it and remove it afterwards, to record local changes (with `cleanup: true` for temporary leftovers) and remove them once cleaned, and to keep the summary current. |
 
 Rules baked into the tool descriptions:
 
@@ -77,4 +86,5 @@ task-tracker 是 Claude Code 插件：在对话旁边放一个「事项总览」
 - 配置（安装时或 `/config`）：`title` 面板标题（默认 Task Tracker，可填「事项总览」）；`language` 卡片写作语言（留空跟随对话，如填 `Simplified Chinese`）；`uiLanguage` 面板固定文字 `en` / `zh`；`asksOnTop` 是否置顶「等你」。
 - 一个待定问题一张卡；计划步骤用代号时，凡出现代号都写「代号 名称」，计划类话题要有总览卡列出全部步骤「代号 名称：状态」。
 - `/compact` 保留面板并把内容交给摘要；`/clear` 清空；新会话从空开始；只放本会话的事。
+- 会话级三块（与「话题」同级、为空不显示）：「总结」（几行，做成了什么、还差什么）、「测试中」（正在测的 URL，可点）、「已创建」（本会话建的 issue / PR / 页面链接，可点）；由工具 `set_session` 写入，`showSummary` 可关总结。另有「等合并」（本会话开出、等你合的 PR，紧贴「等你」下方）与「本机改动」（会话后仍留在本机的定时任务 / 环境变量 / 账号 / 部署 / memory 等，临时 worktree / 分支 / 测试 session / 临时目录标「待清理」）。面板顺序：等你、等合并、总结、测试中、已创建、本机改动、话题。`/compact` 一并交给摘要，`/clear` 清空。
 - License：MIT。
