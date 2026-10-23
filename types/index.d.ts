@@ -14,12 +14,13 @@ export type Topic = {
   asks?: string[]
 }
 
-// A link kept at session level: a URL under test (note) or something created this session (kind: issue / pr / page ...)
+// A link kept at session level: a URL under test (note) or something created this session (kind: issue / pr / page ...; parent: the url of the epic / parent issue a sub-issue hangs under)
 export type SessionLink = {
   label: string
   url: string
   note?: string
   kind?: string
+  parent?: string
   topic?: string
 }
 

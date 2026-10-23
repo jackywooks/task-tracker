@@ -6,7 +6,7 @@ export type RunProcess = (
   init?: { stdin?: string; timeoutMs?: number },
 ) => Promise<{ exitCode: number; stdout: string; stderr: string }>
 
-export type LinkItem = { label: string; url: string }
+export type LinkItem = { label: string; url: string; kind?: string; parent?: string }
 
 export const escapeHtml = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
@@ -20,6 +20,97 @@ export const richPayload = (items: LinkItem[], isList: boolean): { html: string;
         text: items.map(i => `${i.label} ${i.url}`).join('\n'),
       }
     : { html: anchor(items[0]), text: `${items[0].label} ${items[0].url}` }
+
+// ---- Grouped Created links: Issues (numbered, sub-issues nested) -> PRs -> Other ----
+
+export type GroupId = 'issues' | 'prs' | 'other'
+export type GroupNode = { item: LinkItem; children: LinkItem[] }
+export type LinkGroup = { id: GroupId; nodes: GroupNode[] }
+export type GroupNames = Record<GroupId, string>
+
+// kind wins; without a kind the url decides (/pull/ -> pr, /issues/ -> issue); anything else is Other
+export const classify = (i: LinkItem): GroupId => {
+  const k = (i.kind ?? '').trim().toLowerCase()
+  if (k === 'pr' || k === 'pull' || k === 'pull request' || k === 'pull-request') return 'prs'
+  if (k === 'issue' || k === 'epic') return 'issues'
+  if (k !== '') return 'other'
+  if (/\/pull\/\d+/.test(i.url)) return 'prs'
+  if (/\/issues\/\d+/.test(i.url)) return 'issues'
+  return 'other'
+}
+
+// Non-empty groups only. A child hangs under its parent only when the parent is a top-level issue in the list.
+export const groupLinks = (items: LinkItem[]): LinkGroup[] => {
+  const issues = items.filter(i => classify(i) === 'issues')
+  const isNested = (i: LinkItem): boolean =>
+    i.parent !== undefined &&
+    i.parent !== i.url &&
+    issues.some(p => p.url === i.parent && !(p.parent !== undefined && p.parent !== p.url && issues.some(q => q.url === p.parent)))
+  const nodes: GroupNode[] = issues.filter(i => !isNested(i)).map(item => ({ item, children: [] }))
+  for (const i of issues.filter(isNested)) nodes.find(n => n.item.url === i.parent)?.children.push(i)
+  const out: LinkGroup[] = []
+  if (nodes.length > 0) out.push({ id: 'issues', nodes })
+  for (const id of ['prs', 'other'] as const) {
+    const list = items.filter(i => classify(i) === id)
+    if (list.length > 0) out.push({ id, nodes: list.map(item => ({ item, children: [] })) })
+  }
+  return out
+}
+
+const mdEscape = (s: string): string => s.replace(/[\\[\]]/g, c => '\\' + c)
+
+export const mdLink = (i: LinkItem): string => `[${mdEscape(i.label)}](${i.url})`
+
+export const singlePayload = (i: LinkItem): GroupedPayload => ({
+  html: anchor(i),
+  text: `${i.label} ${i.url}`,
+  markdown: mdLink(i),
+})
+
+export type GroupedPayload = { html: string; text: string; markdown: string }
+
+export const groupedPayload = (groups: LinkGroup[], names: GroupNames): GroupedPayload => {
+  const html: string[] = []
+  const text: string[] = []
+  const md: string[] = []
+  for (const g of groups) {
+    html.push(`<p><b>${escapeHtml(names[g.id])}</b></p>`)
+    text.push(names[g.id])
+    md.push(`**${names[g.id]}**`)
+    const link = mdLink
+    if (g.id === 'issues') {
+      html.push(
+        '<ol>' +
+          g.nodes
+            .map(n => {
+              const sub = n.children.length > 0 ? `<ol>${n.children.map(c => `<li>${anchor(c)}</li>`).join('')}</ol>` : ''
+              return `<li>${anchor(n.item)}${sub}</li>`
+            })
+            .join('') +
+          '</ol>',
+      )
+      g.nodes.forEach((n, a) => {
+        text.push(`${a + 1}. ${n.item.label} ${n.item.url}`)
+        md.push(`${a + 1}. ${link(n.item)}`)
+        n.children.forEach((c, b) => {
+          text.push(`   ${a + 1}.${b + 1} ${c.label} ${c.url}`)
+          md.push(`   ${b + 1}. ${link(c)}`)
+        })
+      })
+    } else {
+      html.push(`<ul>${g.nodes.map(n => `<li>${anchor(n.item)}</li>`).join('')}</ul>`)
+      for (const n of g.nodes) {
+        text.push(`- ${n.item.label} ${n.item.url}`)
+        md.push(`- ${link(n.item)}`)
+      }
+    }
+    text.push('')
+    md.push('')
+  }
+  text.pop()
+  md.pop()
+  return { html: html.join(''), text: text.join('\n'), markdown: md.join('\n') }
+}
 
 const toHex = (s: string): string =>
   Array.from(new TextEncoder().encode(s), b => b.toString(16).padStart(2, '0')).join('')

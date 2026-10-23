@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, RenderChildren, ToolCallResult } from 'claude-code'
 
-import { richPayload, writeRich } from './clipboard'
+import { groupLinks, groupedPayload, singlePayload, writeRich } from './clipboard'
+import type { GroupNames, GroupedPayload } from './clipboard'
 
 import type { AgentRun, AgentRunStatus, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
 
@@ -112,6 +113,7 @@ function toLink(raw: unknown): SessionLink | undefined {
   const link: SessionLink = { label, url }
   if (typeof o.note === 'string' && o.note.trim() !== '') link.note = o.note.trim()
   if (typeof o.kind === 'string' && o.kind.trim() !== '') link.kind = o.kind.trim()
+  if (typeof o.parent === 'string' && o.parent.trim() !== '') link.parent = o.parent.trim()
   if (typeof o.topic === 'string' && o.topic.trim() !== '') link.topic = o.topic.trim()
   return link
 }
@@ -217,7 +219,7 @@ function boardText(
   }
   if (session.summary !== '') lines.push(`Session summary: ${session.summary}`)
   for (const t of session.testing) lines.push(`Testing: ${t.label} ${t.url}${t.note ? ` (${t.note})` : ''}`)
-  for (const c of session.created) lines.push(`Created${c.kind ? ` ${c.kind}` : ''}: ${c.label} ${c.url}`)
+  for (const c of session.created) lines.push(`Created${c.kind ? ` ${c.kind}` : ''}: ${c.label} ${c.url}${c.parent ? ` (under ${c.parent})` : ''}`)
   for (const m of session.merges) lines.push(`Awaiting merge: ${m.label} ${m.url}${m.topic ? ` (topic ${m.topic})` : ''}`)
   for (const c of session.changes) {
     lines.push(`Local change${c.cleanup ? ' (to clean up)' : ''}: ${c.label}${c.detail ? ` - ${c.detail}` : ''}`)
@@ -247,6 +249,10 @@ const LABELS = {
     changes: 'Local changes',
     copy: 'copy',
     copyAll: 'copy all',
+    groupIssues: 'Issues',
+    groupPrs: 'PRs',
+    groupOther: 'Other',
+    copyGroup: 'copy group',
     copiedMark: 'Copied',
     copiedRich: 'Copied (rich link)',
     copiedMd: 'Copied (Markdown)',
@@ -285,6 +291,10 @@ const LABELS = {
     changes: '本机改动',
     copy: '复制',
     copyAll: '全部复制',
+    groupIssues: 'Issue',
+    groupPrs: 'PR',
+    groupOther: '其他',
+    copyGroup: '复制本组',
     copiedMark: '已复制',
     copiedRich: '已复制（富链接）',
     copiedMd: '已复制（Markdown）',
@@ -323,6 +333,10 @@ const LABELS = {
     changes: '本機變更',
     copy: '複製',
     copyAll: '全部複製',
+    groupIssues: 'Issue',
+    groupPrs: 'PR',
+    groupOther: '其他',
+    copyGroup: '複製本組',
     copiedMark: '已複製',
     copiedRich: '已複製（富連結）',
     copiedMd: '已複製（Markdown）',
@@ -437,7 +451,9 @@ export const register: Register = (on, options) => {
         'Shown as separate sections next to the topics. ' +
         'summary: short text (a few lines) on where the session stands: what got done and what is still left; when given it replaces the old one, so rewrite it as the session moves on. ' +
         'testing[]: URLs the user is asked to test right now ({label, url, note?}); whenever you start a preview or test environment for the user to try, add its URL, and remove it (untest_urls) once testing is over. ' +
-        'created[]: links to things created in this session ({label, url, kind?} with kind such as issue, pr, page); whenever you create an issue, PR or page, add its full URL right after. ' +
+        'created[]: links to things created in this session ({label, url, kind?, parent?}); whenever you create an issue, PR or page, add its full URL right after. ' +
+        'kind is issue, pr or something else such as page (when omitted it is inferred from the url: /pull/ is a PR, /issues/ is an issue, anything else goes under Other). ' +
+        'The pane groups Created into Issues (numbered), PRs and Other; when you create a sub-issue, set parent to the url of its epic / parent issue so it is listed under it. ' +
         'merges[]: pull requests opened in this session that still wait for the user to merge ({label, url, topic?} with topic the id of the owning topic); add one when you open a PR, and remove it from the awaiting-merge list with merged_urls once the user says it is merged (it stays under created). ' +
         'changes[]: changes left on the user\'s machine that outlive the session ({label, detail?, cleanup?}): a registered scheduled task, an environment variable set, an account or credential switched, a deployed service (detail: version or commit), a memory written, and so on; ' +
         'record one whenever you make such a change, set cleanup: true on temporary leftovers that still have to be cleaned up (temporary worktree or branch, test session, temporary directory) so they stand out, and remove the entry (remove_labels) once it is cleaned up or no longer applies. ' +
@@ -463,7 +479,8 @@ export const register: Register = (on, options) => {
               properties: {
                 label: { type: 'string' },
                 url: { type: 'string' },
-                kind: { type: 'string', description: 'e.g. issue, pr, page' },
+                kind: { type: 'string', description: 'issue, pr, or other such as page' },
+                parent: { type: 'string', description: 'url of the epic / parent issue this sub-issue belongs to' },
               },
               required: ['url'],
             },
@@ -741,23 +758,21 @@ export const register: Register = (on, options) => {
     const copyFormat = typeof options.copyFormat === 'string' ? options.copyFormat : 'rich'
     // copied state: '<how>:<key>' on success (rich / md / plain), '!<key>' on failure
     const copyLinks =
-      (key: string, items: { label: string; url: string }[], isList: boolean) =>
+      (key: string, payload: GroupedPayload) =>
       async (press: { surface: string }) => {
         let how = ''
         if (copyFormat === 'rich') {
           try {
-            const { html, text } = richPayload(items, isList)
-            if (await writeRich((argv, init) => $.process.run(argv, init), html, text)) how = 'rich'
+            if (await writeRich((argv, init) => $.process.run(argv, init), payload.html, payload.text)) how = 'rich'
           } catch {
             // the runtime refused to start a process: fall back to Markdown
           }
         }
         if (!how) {
-          const md = isList
-            ? items.map(i => `- [${i.label}](${i.url})`).join('\n')
-            : `[${items[0].label}](${items[0].url})`
-          const plain = items.map(i => `${i.label} ${i.url}`).join('\n')
-          const res = await $.ui.copy({ text: copyFormat === 'plain' ? plain : md, surface: press.surface as never })
+          const res = await $.ui.copy({
+            text: copyFormat === 'plain' ? payload.text : payload.markdown,
+            surface: press.surface as never,
+          })
           how = res.isCopied ? (copyFormat === 'plain' ? 'plain' : 'md') : 'fail'
         }
         await update($, copied, () => (how === 'fail' ? `!${key}` : `${how}:${key}`))
@@ -765,6 +780,9 @@ export const register: Register = (on, options) => {
           void update($, copied, cur => (cur.endsWith(`:${key}`) || cur === `!${key}` ? '' : cur))
         })
       }
+    const groupNames: GroupNames = { issues: L.groupIssues, prs: L.groupPrs, other: L.groupOther }
+    const createdItems = createdList.map(i => ({ label: clean(i.label), url: i.url, kind: i.kind, parent: i.parent }))
+    const createdGroups = groupLinks(createdItems)
     const copyMark = (key: string) => {
       if (copiedKey === `!${key}`) return ` ✗ ${L.copyFailed}`
       if (copiedKey === `rich:${key}`) return ` ✓ ${L.copiedRich}`
@@ -919,28 +937,54 @@ export const register: Register = (on, options) => {
                 plain
                 dimColor
                 label={` ⧉ ${L.copyAll}${copyMark('created-all')}`}
-                onPress={copyLinks('created-all', createdList.map(i => ({ label: clean(i.label), url: i.url })), true)}
+                onPress={copyLinks('created-all', groupedPayload(createdGroups, groupNames))}
               />
             ),
           )}
-        {(isFolded('created') ? [] : createdList).map(item => (
-          <Box key={`created-${item.url}`} flexDirection="row">
-            <Text color="success">• </Text>
-            <Box flexShrink={1}>
-              <Text>
-                {item.kind ? `${item.kind} · ` : ''}
-                <Link href={item.url}>{clean(item.label)}</Link>
-              </Text>
+        {(isFolded('created') ? [] : createdGroups).map(g => {
+          const row = (item: (typeof createdItems)[number], mark: string, indent: number, showKind: boolean) => (
+            <Box key={`created-${item.url}`} flexDirection="row" marginLeft={indent}>
+              <Text color="success">{mark} </Text>
+              <Box flexShrink={1}>
+                <Text>
+                  {showKind && item.kind ? `${item.kind} · ` : ''}
+                  <Link href={item.url}>{item.label}</Link>
+                </Text>
+              </Box>
+              <Button
+                key={`copy-created-${item.url}`}
+                plain
+                dimColor
+                label={` ⧉ ${L.copy}${copyMark(`created-${item.url}`)}`}
+                onPress={copyLinks(`created-${item.url}`, singlePayload(item))}
+              />
             </Box>
-            <Button
-              key={`copy-created-${item.url}`}
-              plain
-              dimColor
-              label={` ⧉ ${L.copy}${copyMark(`created-${item.url}`)}`}
-              onPress={copyLinks(`created-${item.url}`, [{ label: clean(item.label), url: item.url }], false)}
-            />
-          </Box>
-        ))}
+          )
+          return (
+            <Box key={`created-group-${g.id}`} flexDirection="column">
+              <Box flexDirection="row">
+                <Text bold>{groupNames[g.id]}</Text>
+                <Button
+                  key={`copy-group-${g.id}`}
+                  plain
+                  dimColor
+                  label={` ⧉ ${L.copyGroup}${copyMark(`group-${g.id}`)}`}
+                  onPress={copyLinks(`group-${g.id}`, groupedPayload([g], groupNames))}
+                />
+              </Box>
+              {g.nodes.map((n, a) =>
+                g.id === 'issues' ? (
+                  <Box key={`created-node-${n.item.url}`} flexDirection="column">
+                    {row(n.item, `${a + 1}.`, 0, false)}
+                    {n.children.map((c, k) => row(c, `${a + 1}.${k + 1}`, 3, false))}
+                  </Box>
+                ) : (
+                  row(n.item, '•', 0, g.id === 'other')
+                ),
+              )}
+            </Box>
+          )
+        })}
 
         {changeList.length > 0 && fold('changes', L.changes, changeList.length)}
         {(isFolded('changes') ? [] : changeList).map(item => (
