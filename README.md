@@ -49,7 +49,7 @@ Set when installing, or later in `/config` (each field is a row there):
 |---|---|---|
 | `title` | `Task Tracker` | Title of the pane (also used in the tool descriptions). |
 | `language` | empty | Language Claude writes the cards in, e.g. `Simplified Chinese`. Empty follows the language of the conversation. |
-| `uiLanguage` | `en` | Language of the fixed pane labels: `en` or `zh`. |
+| `uiLanguage` | `en` | Language of the fixed pane labels: `en` (English), `zh` / `zh-CN` (Simplified Chinese) or `zh-TW` (Traditional Chinese). Unknown values fall back to `en`. |
 | `asksOnTop` | `true` | Show the "Needs you" section on top. |
 | `showSummary` | `true` | Show the session Summary section. |
 
@@ -59,7 +59,7 @@ Set when installing, or later in `/config` (each field is a row there):
 |---|---|
 | `mcp__task-tracker__set_topics` | Merge-update cards by `id`: pass only the topics that changed and only the changed fields (an empty array clears a field). Fields: `title`, `status` (doing, waiting, blocked, todo, done), `line`, `background`, `decided[]`, `outputs[]`, `pending[]`, `asks[]`; plus `now` (id of the current topic) and `remove` (delete cards). |
 | `mcp__task-tracker__set_agent_summary` | After a subagent finishes and its report is read, record what it delivered (2-5 points); can re-file it under another topic with `topic`. |
-| `mcp__task-tracker__set_session` | Session-level record: `summary` (text, replaces the old one), `testing[]` (`{label, url, note?}`, URLs under test), `created[]` (`{label, url, kind?}`, issues / PRs / pages created), `merges[]` (`{label, url, topic?}`, PRs awaiting your merge), all merged by `url`; `changes[]` (`{label, detail?, cleanup?}`, local changes) merged by `label`; `remove_urls[]` / `remove_labels[]` delete entries. Claude is told to add a link right after creating an issue / PR / page, to add a PR to `merges` when it opens it and remove it when you merge, to list a preview URL while you test it and remove it afterwards, to record local changes (with `cleanup: true` for temporary leftovers) and remove them once cleaned, and to keep the summary current. |
+| `mcp__task-tracker__set_session` | Session-level record: `summary` (text, replaces the old one), `testing[]` (`{label, url, note?}`, URLs under test), `created[]` (`{label, url, kind?}`, issues / PRs / pages created), `merges[]` (`{label, url, topic?}`, PRs awaiting your merge), all merged by `url`; `changes[]` (`{label, detail?, cleanup?}`, local changes) merged by `label`; `untest_urls[]` deletes from testing only, `merged_urls[]` deletes from merges only (the PR stays under Created), `remove_urls[]` deletes from testing, created and merges all at once (generally for entries added by mistake), `remove_labels[]` deletes from changes. Claude is told to add a link right after creating an issue / PR / page, to add a PR to `merges` when it opens it and drop it with `merged_urls` when you merge, to list a preview URL while you test it and drop it with `untest_urls` afterwards, to record local changes (with `cleanup: true` for temporary leftovers) and remove them once cleaned, and to keep the summary current. |
 
 Rules baked into the tool descriptions:
 
@@ -87,9 +87,13 @@ MIT — see [LICENSE](LICENSE).
 task-tracker 是 Claude Code 插件：在对话旁边放一个「事项总览」侧栏，记录本会话说过什么、定了什么、产出什么、还差什么，不用往上翻聊天记录。同时做几件事时，每件事一张可折叠卡片；所有待你回答的问题汇总在置顶的「等你」。
 
 - 安装：`/plugin install task-tracker --marketplace jackywooks/task-tracker`（用户级，所有 repo 可用）。
-- 配置（安装时或 `/config`）：`title` 面板标题（默认 Task Tracker，可填「事项总览」）；`language` 卡片写作语言（留空跟随对话，如填 `Simplified Chinese`）；`uiLanguage` 面板固定文字 `en` / `zh`；`asksOnTop` 是否置顶「等你」。
+- 配置（安装时或 `/config`）：`title` 面板标题（默认 Task Tracker，可填「事项总览」）；`language` 卡片写作语言（留空跟随对话，如填 `Simplified Chinese`）；`uiLanguage` 面板固定文字 `en`（英文）/ `zh` 或 `zh-CN`（简体）/ `zh-TW`（繁体，台湾用语）；`asksOnTop` 是否置顶「等你」。
 - 一个待定问题一张卡；计划步骤用代号时，凡出现代号都写「代号 名称」，计划类话题要有总览卡列出全部步骤「代号 名称：状态」。
 - `/compact` 保留面板并把内容交给摘要；`/clear` 清空；新会话从空开始；只放本会话的事。
 - 会话级三块（与「话题」同级、为空不显示）：「总结」（几行，做成了什么、还差什么）、「测试中」（正在测的 URL，可点）、「已创建」（本会话建的 issue / PR / 页面链接，可点）；由工具 `set_session` 写入，`showSummary` 可关总结。另有「等合并」（本会话开出、等你合的 PR，紧贴「等你」下方）与「本机改动」（会话后仍留在本机的定时任务 / 环境变量 / 账号 / 部署 / memory 等，临时 worktree / 分支 / 测试 session / 临时目录标「待清理」）。面板顺序：等你、等合并、总结、测试中、已创建、本机改动、话题。`/compact` 一并交给摘要，`/clear` 清空。
 - 会话级区块（等合并、总结、测试中、已创建、本机改动）点标题（`▾` / `▸`）可收起 / 展开，标题后始终显示条数（如「本机改动 (7)」）；「本机改动」默认收起，其余默认展开；状态存在会话 state，`/clear` 重置；「等你」和话题卡片不变。「已创建」每行有「⧉ 复制」按钮（复制 `label — url`），标题处有「⧉ 全部复制」（每行 `- [label](url)` 的 Markdown 列表）；复制后短暂显示「✓ 已复制」。
 - License：MIT。
+
+## 繁體中文說明
+
+task-tracker 是 Claude Code 外掛：在對話旁放一個「事項總覽」側欄，記錄本工作階段談了什麼、決定了什麼、產出什麼、還差什麼。介面語言設定 `uiLanguage` 可選 `en`、`zh`（簡體，同 `zh-CN`）、`zh-TW`（繁體）；填 `zh-TW` 即可讓面板固定文字顯示繁體。卡片內容的語言由 `language` 控制（例如填 `Traditional Chinese`）。
