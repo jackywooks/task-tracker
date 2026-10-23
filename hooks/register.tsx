@@ -1,6 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, RenderChildren, ToolCallResult } from 'claude-code'
 
+import { richPayload, writeRich } from './clipboard'
+
 import type { AgentRun, AgentRunStatus, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
 
 const PANE = 'task-tracker'
@@ -246,6 +248,8 @@ const LABELS = {
     copy: 'copy',
     copyAll: 'copy all',
     copiedMark: 'Copied',
+    copiedRich: 'Copied (rich link)',
+    copiedMd: 'Copied (Markdown)',
     copyFailed: 'Copy failed',
     cleanup: 'CLEAN UP',
     sessionUpdated: (t: number, c: number, m: number, k: number) =>
@@ -282,6 +286,8 @@ const LABELS = {
     copy: '复制',
     copyAll: '全部复制',
     copiedMark: '已复制',
+    copiedRich: '已复制（富链接）',
+    copiedMd: '已复制（Markdown）',
     copyFailed: '复制失败',
     cleanup: '待清理',
     sessionUpdated: (t: number, c: number, m: number, k: number) =>
@@ -318,6 +324,8 @@ const LABELS = {
     copy: '複製',
     copyAll: '全部複製',
     copiedMark: '已複製',
+    copiedRich: '已複製（富連結）',
+    copiedMd: '已複製（Markdown）',
     copyFailed: '複製失敗',
     cleanup: '待清理',
     sessionUpdated: (t: number, c: number, m: number, k: number) =>
@@ -730,15 +738,39 @@ export const register: Register = (on, options) => {
     const isFolded = (id: string) => FOLDED_BY_DEFAULT.includes(id) !== flips.includes(id)
     const flip = (id: string) => () =>
       update($, flipped, ids => (ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]))
-    const copyText = (key: string, text: string) => async (press: { surface: string }) => {
-      const res = await $.ui.copy({ text, surface: press.surface as never })
-      await update($, copied, () => (res.isCopied ? key : `!${key}`))
-      $.clock.after(1500, () => {
-        void update($, copied, cur => (cur === key || cur === `!${key}` ? '' : cur))
-      })
+    const copyFormat = typeof options.copyFormat === 'string' ? options.copyFormat : 'rich'
+    // copied state: '<how>:<key>' on success (rich / md / plain), '!<key>' on failure
+    const copyLinks =
+      (key: string, items: { label: string; url: string }[], isList: boolean) =>
+      async (press: { surface: string }) => {
+        let how = ''
+        if (copyFormat === 'rich') {
+          try {
+            const { html, text } = richPayload(items, isList)
+            if (await writeRich((argv, init) => $.process.run(argv, init), html, text)) how = 'rich'
+          } catch {
+            // the runtime refused to start a process: fall back to Markdown
+          }
+        }
+        if (!how) {
+          const md = isList
+            ? items.map(i => `- [${i.label}](${i.url})`).join('\n')
+            : `[${items[0].label}](${items[0].url})`
+          const plain = items.map(i => `${i.label} ${i.url}`).join('\n')
+          const res = await $.ui.copy({ text: copyFormat === 'plain' ? plain : md, surface: press.surface as never })
+          how = res.isCopied ? (copyFormat === 'plain' ? 'plain' : 'md') : 'fail'
+        }
+        await update($, copied, () => (how === 'fail' ? `!${key}` : `${how}:${key}`))
+        $.clock.after(1500, () => {
+          void update($, copied, cur => (cur.endsWith(`:${key}`) || cur === `!${key}` ? '' : cur))
+        })
+      }
+    const copyMark = (key: string) => {
+      if (copiedKey === `!${key}`) return ` ✗ ${L.copyFailed}`
+      if (copiedKey === `rich:${key}`) return ` ✓ ${L.copiedRich}`
+      if (copiedKey === `md:${key}`) return ` ✓ ${L.copiedMd}`
+      return copiedKey === `plain:${key}` ? ` ✓ ${L.copiedMark}` : ''
     }
-    const copyMark = (key: string) =>
-      copiedKey === key ? ` ✓ ${L.copiedMark}` : copiedKey === `!${key}` ? ` ✗ ${L.copyFailed}` : ''
     const reveal = (id: string) => () => update($, expanded, ids => (ids.includes(id) ? ids : [...ids, id]))
 
     const rich = (text: string, color?: string) => (
@@ -887,7 +919,7 @@ export const register: Register = (on, options) => {
                 plain
                 dimColor
                 label={` ⧉ ${L.copyAll}${copyMark('created-all')}`}
-                onPress={copyText('created-all', createdList.map(i => `- [${clean(i.label)}](${i.url})`).join('\n'))}
+                onPress={copyLinks('created-all', createdList.map(i => ({ label: clean(i.label), url: i.url })), true)}
               />
             ),
           )}
@@ -905,7 +937,7 @@ export const register: Register = (on, options) => {
               plain
               dimColor
               label={` ⧉ ${L.copy}${copyMark(`created-${item.url}`)}`}
-              onPress={copyText(`created-${item.url}`, `${clean(item.label)} — ${item.url}`)}
+              onPress={copyLinks(`created-${item.url}`, [{ label: clean(item.label), url: item.url }], false)}
             />
           </Box>
         ))}

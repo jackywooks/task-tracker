@@ -15,7 +15,9 @@ A Claude Code plugin that keeps a **side pane recording the current session**: w
 
 Session-level sections (Awaiting merge, Summary, Testing, Created, Local changes) fold: click the header (`▾` / `▸`) to collapse or expand; the header keeps showing the item count, e.g. `Local changes (7)`. Local changes starts folded, the others start open; the choice is kept in the session state (reset by `/clear`). Needs you and the topic cards are unchanged.
 
-In **Created**, every row has a `⧉ copy` button that puts `label — url` on the clipboard, and the header has `⧉ copy all`, which copies every entry as a Markdown list (`- [label](url)`, one per line). The button briefly shows `✓ Copied` (or `✗ Copy failed` when no clipboard was reachable, e.g. a remote surface). Copying uses the host's `$.ui.copy` (the terminal's clipboard tool / OSC 52).
+In **Created**, every row has a `⧉ copy` button, and the header has `⧉ copy all`. By default (`copyFormat: rich`) the copy is a real hyperlink, like Tab Copy: the plugin writes an HTML flavor (`<a href="url">label</a>`; for copy all a `<ul>` of links) plus a plain-text flavor (`label url`, one per line) through the operating system, so pasting into Lark, Notion, Slack, Gmail or Word gives a clickable link. Mechanism per platform: Windows runs the system `powershell.exe` (Windows PowerShell 5.1, `-STA`) with `System.Windows.Forms.Clipboard` and a CF_HTML block (UTF-8); macOS runs `osascript` setting `«class HTML»` plus text; Linux uses `wl-copy --type text/html`, else `xclip -selection clipboard -t text/html` (HTML flavor only). Labels and URLs are passed as data (JSON on stdin, or hex literals), never spliced into a command line. If the runtime cannot start a process, the platform is unsupported, or a tool fails, the copy falls back to the Markdown link `[label](url)` through the host's `$.ui.copy` (terminal clipboard tool / OSC 52). The button briefly shows `✓ Copied (rich link)`, `✓ Copied (Markdown)` or `✗ Copy failed`. Only Windows is verified so far; macOS and Linux are untested.
+
+`copyFormat` (setting): `rich` (default), `markdown` (always `[label](url)` text, no process started) or `plain` (`label url` text).
 
 Session-level sections (Summary, Testing, Created) belong to the whole session, not to a topic, and are hidden while empty. Top to bottom: Needs you, Awaiting merge, Summary, Testing, Created, Local changes, Topics, Other agents.
 
@@ -52,6 +54,7 @@ Set when installing, or later in `/config` (each field is a row there):
 | `uiLanguage` | `en` | Language of the fixed pane labels: `en` (English), `zh` / `zh-CN` (Simplified Chinese) or `zh-TW` (Traditional Chinese). Unknown values fall back to `en`. |
 | `asksOnTop` | `true` | Show the "Needs you" section on top. |
 | `showSummary` | `true` | Show the session Summary section. |
+| `copyFormat` | `rich` | Copy format of Created links: `rich` (HTML + text hyperlink via the OS, Markdown fallback), `markdown`, `plain`. |
 
 ## Tools Claude uses
 
@@ -91,9 +94,11 @@ task-tracker 是 Claude Code 插件：在对话旁边放一个「事项总览」
 - 一个待定问题一张卡；计划步骤用代号时，凡出现代号都写「代号 名称」，计划类话题要有总览卡列出全部步骤「代号 名称：状态」。
 - `/compact` 保留面板并把内容交给摘要；`/clear` 清空；新会话从空开始；只放本会话的事。
 - 会话级三块（与「话题」同级、为空不显示）：「总结」（几行，做成了什么、还差什么）、「测试中」（正在测的 URL，可点）、「已创建」（本会话建的 issue / PR / 页面链接，可点）；由工具 `set_session` 写入，`showSummary` 可关总结。另有「等合并」（本会话开出、等你合的 PR，紧贴「等你」下方）与「本机改动」（会话后仍留在本机的定时任务 / 环境变量 / 账号 / 部署 / memory 等，临时 worktree / 分支 / 测试 session / 临时目录标「待清理」）。面板顺序：等你、等合并、总结、测试中、已创建、本机改动、话题。`/compact` 一并交给摘要，`/clear` 清空。
-- 会话级区块（等合并、总结、测试中、已创建、本机改动）点标题（`▾` / `▸`）可收起 / 展开，标题后始终显示条数（如「本机改动 (7)」）；「本机改动」默认收起，其余默认展开；状态存在会话 state，`/clear` 重置；「等你」和话题卡片不变。「已创建」每行有「⧉ 复制」按钮（复制 `label — url`），标题处有「⧉ 全部复制」（每行 `- [label](url)` 的 Markdown 列表）；复制后短暂显示「✓ 已复制」。
+- 会话级区块（等合并、总结、测试中、已创建、本机改动）点标题（`▾` / `▸`）可收起 / 展开，标题后始终显示条数（如「本机改动 (7)」）；「本机改动」默认收起，其余默认展开；状态存在会话 state，`/clear` 重置；「等你」和话题卡片不变。「已创建」每行有「⧉ 复制」按钮，标题处有「⧉ 全部复制」。默认（`copyFormat: rich`）复制的是真正的富链接（类似 Tab Copy）：通过操作系统同时写入 HTML（`<a href="url">label</a>`，全部复制为 `<ul>` 列表）和纯文本（`label url`，每行一条），粘贴到 Lark、Notion、Slack、邮件、Word 都是可点的链接。各平台机制：Windows 调系统自带 `powershell.exe`（5.1，`-STA`）+ `System.Windows.Forms.Clipboard` 写 CF_HTML（UTF-8）；macOS 用 `osascript` 设 `«class HTML»` 与文本；Linux 用 `wl-copy --type text/html`，否则 `xclip -selection clipboard -t text/html`（仅 HTML）。label / url 只作为数据传入（stdin 的 JSON 或十六进制字面量），不拼进命令行。运行时不允许起子进程、平台不支持或工具失败时，退回 Markdown 链接 `[label](url)`（走宿主 `$.ui.copy`）。按钮短暂显示「✓ 已复制（富链接）」/「✓ 已复制（Markdown）」/「✗ 复制失败」。目前只在 Windows 验证过，macOS / Linux 未验证。配置项 `copyFormat`：`rich`（默认）/ `markdown`（始终 `[label](url)` 文本）/ `plain`（`label url` 文本）。
 - License：MIT。
 
 ## 繁體中文說明
 
 task-tracker 是 Claude Code 外掛：在對話旁放一個「事項總覽」側欄，記錄本工作階段談了什麼、決定了什麼、產出什麼、還差什麼。介面語言設定 `uiLanguage` 可選 `en`、`zh`（簡體，同 `zh-CN`）、`zh-TW`（繁體）；填 `zh-TW` 即可讓面板固定文字顯示繁體。卡片內容的語言由 `language` 控制（例如填 `Traditional Chinese`）。
+
+「已建立」每行有「⧉ 複製」按鈕，標題處有「⧉ 全部複製」。預設（`copyFormat: rich`）複製的是真正的富連結（類似 Tab Copy）：透過作業系統同時寫入 HTML（`<a href="url">label</a>`，全部複製為 `<ul>` 清單）與純文字（`label url`，每行一筆），貼到 Lark、Notion、Slack、郵件、Word 都是可點的連結。各平台機制：Windows 呼叫系統內建 `powershell.exe`（5.1，`-STA`）＋ `System.Windows.Forms.Clipboard` 寫入 CF_HTML（UTF-8）；macOS 以 `osascript` 設定 `«class HTML»` 與文字；Linux 用 `wl-copy --type text/html`，否則 `xclip -selection clipboard -t text/html`（僅 HTML）。label / url 僅作為資料傳入（stdin 的 JSON 或十六進位字面量），不拼進命令列。執行環境不允許啟動子行程、平台不支援或工具失敗時，退回 Markdown 連結 `[label](url)`（走宿主 `$.ui.copy`）。按鈕短暫顯示「✓ 已複製（富連結）」/「✓ 已複製（Markdown）」/「✗ 複製失敗」。目前僅在 Windows 驗證過，macOS / Linux 未驗證。設定 `copyFormat`：`rich`（預設）/ `markdown`（一律 `[label](url)` 文字）/ `plain`（`label url` 文字）。
