@@ -296,11 +296,59 @@ const LABELS = {
     asks: '问你',
     hint: '点 ▸ 展开话题 · 点「等你」里的问题跳到那个话题',
   },
-} as const
+  'zh-TW': {
+    opened: '面板已開啟。',
+    noAgent: (key: string) => `找不到描述含「${key}」的 agent，未更新`,
+    recorded: (name: string, n: number) => `已記錄「${name}」的結果 ${n} 條`,
+    updated: (n: number, total: number) => `已更新 ${n} 個話題，面板共 ${total} 個`,
+    toolCalls: (n: number) => `${n} 次工具`,
+    running: '進行中…',
+    noResult: '還沒整理結果',
+    background: '背景執行',
+    stats: (n: number, done: number) => `本工作階段 · ${n} 個話題 · ${done} 個完成`,
+    updatedAt: (t: string) => ` · ${t} 更新`,
+    empty: '還沒有話題。',
+    needsYou: '等你',
+    topics: '話題',
+    summary: '總結',
+    testing: '測試中',
+    created: '已建立',
+    merges: '等合併',
+    changes: '本機變更',
+    copy: '複製',
+    copyAll: '全部複製',
+    copiedMark: '已複製',
+    copyFailed: '複製失敗',
+    cleanup: '待清理',
+    sessionUpdated: (t: number, c: number, m: number, k: number) =>
+      `工作階段資訊已更新；測試中 ${t} 條，已建立 ${c} 條，等合併 ${m} 條，本機變更 ${k} 條`,
+    otherAgents: '其他 Agent',
+    now: '  ← 現在',
+    line: '現在 ',
+    bg: '背景 ',
+    decided: '已決定',
+    outputs: '產出',
+    pending: '還差',
+    asks: '問你',
+    hint: '點 ▸ 展開話題 · 點「等你」裡的問題跳到該話題',
+  },
+}
+
+// Every language must define exactly the keys of `en`; a missing key fails the type check.
+type Labels = typeof LABELS.en
+const _labelsCheck: Record<'zh' | 'zh-TW', Labels> = LABELS
+void _labelsCheck
+
+const LABEL_SETS: Record<string, Labels> = {
+  en: LABELS.en,
+  zh: LABELS.zh,
+  'zh-CN': LABELS.zh,
+  'zh-TW': LABELS['zh-TW'],
+}
 
 export const register: Register = (on, options) => {
   const TITLE = typeof options.title === 'string' && options.title.trim() !== '' ? options.title.trim() : 'Task Tracker'
-  const L = options.uiLanguage === 'zh' ? LABELS.zh : LABELS.en
+  const L = (typeof options.uiLanguage === 'string' && LABEL_SETS[options.uiLanguage]) || LABELS.en
   const asksOnTop = options.asksOnTop !== false
   const showSummary = options.showSummary !== false
   const language = typeof options.language === 'string' ? options.language.trim() : ''
@@ -380,12 +428,12 @@ export const register: Register = (on, options) => {
         `Keep the session-level part of the "${TITLE}" side pane: what belongs to the whole session rather than to one topic. ` +
         'Shown as separate sections next to the topics. ' +
         'summary: short text (a few lines) on where the session stands: what got done and what is still left; when given it replaces the old one, so rewrite it as the session moves on. ' +
-        'testing[]: URLs the user is asked to test right now ({label, url, note?}); whenever you start a preview or test environment for the user to try, add its URL, and remove it (remove_urls) once testing is over. ' +
+        'testing[]: URLs the user is asked to test right now ({label, url, note?}); whenever you start a preview or test environment for the user to try, add its URL, and remove it (untest_urls) once testing is over. ' +
         'created[]: links to things created in this session ({label, url, kind?} with kind such as issue, pr, page); whenever you create an issue, PR or page, add its full URL right after. ' +
-        'merges[]: pull requests opened in this session that still wait for the user to merge ({label, url, topic?} with topic the id of the owning topic); add one when you open a PR, and remove it (remove_urls) once the user says it is merged. ' +
+        'merges[]: pull requests opened in this session that still wait for the user to merge ({label, url, topic?} with topic the id of the owning topic); add one when you open a PR, and remove it from the awaiting-merge list with merged_urls once the user says it is merged (it stays under created). ' +
         'changes[]: changes left on the user\'s machine that outlive the session ({label, detail?, cleanup?}): a registered scheduled task, an environment variable set, an account or credential switched, a deployed service (detail: version or commit), a memory written, and so on; ' +
         'record one whenever you make such a change, set cleanup: true on temporary leftovers that still have to be cleaned up (temporary worktree or branch, test session, temporary directory) so they stand out, and remove the entry (remove_labels) once it is cleaned up or no longer applies. ' +
-        'testing, created and merges entries merge by url, changes entries by label (a repeat replaces the old entry); remove_urls[] deletes entries from testing, created and merges; remove_labels[] deletes entries from changes. ' +
+        'testing, created and merges entries merge by url, changes entries by label (a repeat replaces the old entry); untest_urls[] deletes entries from testing only; merged_urls[] deletes entries from merges only (the user said the PR is merged); remove_urls[] deletes entries from testing, created and merges all at once, generally for entries added by mistake; remove_labels[] deletes entries from changes. ' +
         'Pass only what changed. ' +
         `Write labels, notes and the summary in ${writeIn}, each line short; never use circled digits.`,
       inputSchema: {
@@ -436,7 +484,9 @@ export const register: Register = (on, options) => {
               required: ['label'],
             },
           },
-          remove_urls: { type: 'array', items: { type: 'string' }, description: 'URLs to delete from testing, created and merges' },
+          remove_urls: { type: 'array', items: { type: 'string' }, description: 'URLs to delete from testing, created and merges all at once; generally for entries added by mistake' },
+          untest_urls: { type: 'array', items: { type: 'string' }, description: 'URLs to delete from testing only (testing is over)' },
+          merged_urls: { type: 'array', items: { type: 'string' }, description: 'URLs to delete from merges only (the user said the PR is merged); created keeps them' },
           remove_labels: { type: 'array', items: { type: 'string' }, description: 'Labels to delete from changes' },
         },
       },
@@ -592,9 +642,13 @@ export const register: Register = (on, options) => {
       merges?: unknown
       changes?: unknown
       remove_urls?: unknown
+      untest_urls?: unknown
+      merged_urls?: unknown
       remove_labels?: unknown
     }
     const remove = strings(input.remove_urls) ?? []
+    const untest = strings(input.untest_urls) ?? []
+    const merged = strings(input.merged_urls) ?? []
     const removeLabels = strings(input.remove_labels) ?? []
     const clock = new Date()
     const stamp = `${String(clock.getHours()).padStart(2, '0')}:${String(clock.getMinutes()).padStart(2, '0')}`
@@ -604,7 +658,7 @@ export const register: Register = (on, options) => {
     let m = 0
     let k = 0
     await update($, testing, list => {
-      const next = mergeLinks(list, input.testing, remove)
+      const next = mergeLinks(list, input.testing, [...remove, ...untest])
       t = next.length
       return next
     })
@@ -614,7 +668,7 @@ export const register: Register = (on, options) => {
       return next
     })
     await update($, merges, list => {
-      const next = mergeLinks(list, input.merges, remove)
+      const next = mergeLinks(list, input.merges, [...remove, ...merged])
       m = next.length
       return next
     })

@@ -1,6 +1,6 @@
 {
   "name": "task-tracker",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, a session summary, URLs under test and links to what was created, subagents with their results",
   "keywords": ["panel", "topics", "tracker", "agents"],
   "types": "./types/index.d.ts",
@@ -20,8 +20,8 @@
     "uiLanguage": {
       "type": "string",
       "title": "Pane label language",
-      "description": "Language of the fixed labels on the pane (section names, hints).",
-      "options": ["en", "zh"],
+      "description": "Language of the fixed labels on the pane (section names, hints): en, zh (Simplified Chinese, same as zh-CN) or zh-TW (Traditional Chinese). Unknown values fall back to en.",
+      "options": ["en", "zh", "zh-CN", "zh-TW"],
       "default": "en"
     },
     "asksOnTop": {
