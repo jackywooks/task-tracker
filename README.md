@@ -15,7 +15,7 @@ A Claude Code plugin that keeps a **side pane recording the current session**: w
 
 Session-level sections (Awaiting merge, Summary, Testing, Created, Local changes) fold: click the header (`▾` / `▸`) to collapse or expand; the header keeps showing the item count, e.g. `Local changes (7)`. Local changes starts folded, the others start open; the choice is kept in the session state (reset by `/clear`). Needs you and the topic cards are unchanged.
 
-In **Created**, every row has a `⧉ copy` button that puts `label — url` on the clipboard, and the header has `⧉ copy all`, which copies every entry as a Markdown list (`- [label](url)`, one per line). The button briefly shows `✓ Copied` (or `✗ Copy failed` when no clipboard was reachable, e.g. a remote surface). Copying uses the host's `$.ui.copy` (the terminal's clipboard tool / OSC 52).
+In **Created**, every row has a `⧉ copy` button that puts the Markdown link `[label](url)` on the clipboard, and the header has `⧉ copy all`, which copies every entry as a Markdown list (`- [label](url)`, one per line). The button briefly shows `✓ Copied` (or `✗ Copy failed` when no clipboard was reachable, e.g. a remote surface). Copying uses the host's `$.ui.copy` (the terminal's clipboard tool / OSC 52), which takes plain text only (no HTML / rich-text MIME), so the copy is Markdown rather than a true rich link: Markdown-aware editors (Notion, Slack with markdown paste, GitHub) turn `[label](url)` into a hyperlink on paste, while plain-text targets show it readable as-is.
 
 Session-level sections (Summary, Testing, Created) belong to the whole session, not to a topic, and are hidden while empty. Top to bottom: Needs you, Awaiting merge, Summary, Testing, Created, Local changes, Topics, Other agents.
 
@@ -91,9 +91,11 @@ task-tracker 是 Claude Code 插件：在对话旁边放一个「事项总览」
 - 一个待定问题一张卡；计划步骤用代号时，凡出现代号都写「代号 名称」，计划类话题要有总览卡列出全部步骤「代号 名称：状态」。
 - `/compact` 保留面板并把内容交给摘要；`/clear` 清空；新会话从空开始；只放本会话的事。
 - 会话级三块（与「话题」同级、为空不显示）：「总结」（几行，做成了什么、还差什么）、「测试中」（正在测的 URL，可点）、「已创建」（本会话建的 issue / PR / 页面链接，可点）；由工具 `set_session` 写入，`showSummary` 可关总结。另有「等合并」（本会话开出、等你合的 PR，紧贴「等你」下方）与「本机改动」（会话后仍留在本机的定时任务 / 环境变量 / 账号 / 部署 / memory 等，临时 worktree / 分支 / 测试 session / 临时目录标「待清理」）。面板顺序：等你、等合并、总结、测试中、已创建、本机改动、话题。`/compact` 一并交给摘要，`/clear` 清空。
-- 会话级区块（等合并、总结、测试中、已创建、本机改动）点标题（`▾` / `▸`）可收起 / 展开，标题后始终显示条数（如「本机改动 (7)」）；「本机改动」默认收起，其余默认展开；状态存在会话 state，`/clear` 重置；「等你」和话题卡片不变。「已创建」每行有「⧉ 复制」按钮（复制 `label — url`），标题处有「⧉ 全部复制」（每行 `- [label](url)` 的 Markdown 列表）；复制后短暂显示「✓ 已复制」。
+- 会话级区块（等合并、总结、测试中、已创建、本机改动）点标题（`▾` / `▸`）可收起 / 展开，标题后始终显示条数（如「本机改动 (7)」）；「本机改动」默认收起，其余默认展开；状态存在会话 state，`/clear` 重置；「等你」和话题卡片不变。「已创建」每行有「⧉ 复制」按钮（复制 Markdown 链接 `[label](url)`），标题处有「⧉ 全部复制」（每行 `- [label](url)` 的 Markdown 列表）；复制后短暂显示「✓ 已复制」。运行时的 `$.ui.copy` 只能写纯文本（不支持 HTML / 富文本），所以复制的是 Markdown 而非真正的富链接：支持 Markdown 粘贴的编辑器会转成超链接，纯文本处则直接可读。
 - License：MIT。
 
 ## 繁體中文說明
 
 task-tracker 是 Claude Code 外掛：在對話旁放一個「事項總覽」側欄，記錄本工作階段談了什麼、決定了什麼、產出什麼、還差什麼。介面語言設定 `uiLanguage` 可選 `en`、`zh`（簡體，同 `zh-CN`）、`zh-TW`（繁體）；填 `zh-TW` 即可讓面板固定文字顯示繁體。卡片內容的語言由 `language` 控制（例如填 `Traditional Chinese`）。
+
+「已建立」每行有「⧉ 複製」按鈕（複製 Markdown 連結 `[label](url)`），標題處有「⧉ 全部複製」（每行 `- [label](url)` 的 Markdown 清單）。執行環境的 `$.ui.copy` 只能寫純文字（不支援 HTML / 富文字），因此複製的是 Markdown 而非真正的富連結：支援 Markdown 貼上的編輯器會轉成超連結，純文字處則直接可讀。

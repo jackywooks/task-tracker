@@ -905,7 +905,7 @@ export const register: Register = (on, options) => {
               plain
               dimColor
               label={` ⧉ ${L.copy}${copyMark(`created-${item.url}`)}`}
-              onPress={copyText(`created-${item.url}`, `${clean(item.label)} — ${item.url}`)}
+              onPress={copyText(`created-${item.url}`, `[${clean(item.label)}](${item.url})`)}
             />
           </Box>
         ))}
