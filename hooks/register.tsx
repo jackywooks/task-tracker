@@ -4,12 +4,18 @@ import type { Register, RenderChildren, ToolCallResult } from 'claude-code'
 import { groupLinks, groupedPayload, singlePayload, writeRich } from './clipboard'
 import type { GroupNames, GroupedPayload } from './clipboard'
 
+import { addParked, changeParked, groupParked, loadParked, stamp as parkedStamp, whereAmI } from './parked'
+import type { Parked, ParkedStatus } from './parked'
+
 import type { AgentRun, AgentRunStatus, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
 
 const PANE = 'task-tracker'
 const TOPICS_TOOL: string = 'mcp__task-tracker__set_topics'
 const SUMMARY_TOOL: string = 'mcp__task-tracker__set_agent_summary'
 const SESSION_TOOL: string = 'mcp__task-tracker__set_session'
+const PARK_TOOL: string = 'mcp__task-tracker__park_prompt'
+const LIST_PARKED_TOOL: string = 'mcp__task-tracker__list_parked'
+const UPDATE_PARKED_TOOL: string = 'mcp__task-tracker__update_parked'
 
 const topics = atom({ plugin: 'task-tracker', key: 'topics' } as const, [])
 const now = atom({ plugin: 'task-tracker', key: 'now' } as const, '')
@@ -24,6 +30,10 @@ const changes = atom({ plugin: 'task-tracker', key: 'changes' } as const, [])
 // Section ids the person flipped away from their default (Local changes defaults to folded, the rest to open)
 const flipped = atom({ plugin: 'task-tracker', key: 'flipped' } as const, [])
 const copied = atom({ plugin: 'task-tracker', key: 'copied' } as const, '')
+// Parked prompts live in $.store (all repos, all sessions); this counter only redraws the pane after a write
+const parkedTick = atom({ plugin: 'task-tracker', key: 'parkedTick' } as const, 0)
+// Group ids the person flipped away from their default (current repo / session open, others folded; 'asked:<repo>' shows asked items)
+const parkedFlipped = atom({ plugin: 'task-tracker', key: 'parkedFlipped' } as const, [])
 
 const FOLDED_BY_DEFAULT = ['changes']
 
@@ -269,6 +279,24 @@ const LABELS = {
     pending: 'Pending',
     asks: 'Asks',
     hint: 'Click ▸ to expand a topic · click a question under "Needs you" to jump to its topic',
+    parked: 'Parked prompts',
+    parkedCount: (n: number) => `${n} parked`,
+    parkedFill: 'fill',
+    parkedCopy: 'copy',
+    parkedAsked: 'asked',
+    parkedReopen: 'reopen',
+    parkedDelete: 'delete',
+    parkedShowAsked: (n: number) => `show asked (${n})`,
+    parkedHideAsked: (n: number) => `hide asked (${n})`,
+    parkedCurrent: ' (current)',
+    parkedCopied: '✓ Copied',
+    parkedFilled: '✓ Put in the prompt box',
+    parkedFillFailed: '✗ No prompt box to fill',
+    parkedSaved: (n: number) => `Parked (${n} waiting). Ask later from the pane.`,
+    parkedUsage: 'Usage: /park <text> — saves the text to ask later; nothing is sent to Claude.',
+    parkedNone: 'No parked prompts.',
+    parkedUnknown: (id: string) => `No parked prompt with id ${id}`,
+    parkedUpdated: (what: string, id: string) => `Parked prompt ${id} ${what}`,
   },
   zh: {
     opened: '面板已打开。',
@@ -311,6 +339,24 @@ const LABELS = {
     pending: '还差',
     asks: '问你',
     hint: '点 ▸ 展开话题 · 点「等你」里的问题跳到那个话题',
+    parked: '待问',
+    parkedCount: (n: number) => `${n} 条待问`,
+    parkedFill: '填入',
+    parkedCopy: '复制',
+    parkedAsked: '已问',
+    parkedReopen: '恢复',
+    parkedDelete: '删除',
+    parkedShowAsked: (n: number) => `显示已问 (${n})`,
+    parkedHideAsked: (n: number) => `隐藏已问 (${n})`,
+    parkedCurrent: '（当前）',
+    parkedCopied: '✓ 已复制',
+    parkedFilled: '✓ 已填入输入框',
+    parkedFillFailed: '✗ 没有可填的输入框',
+    parkedSaved: (n: number) => `已存入待问（共 ${n} 条未问），之后可在面板里取用。`,
+    parkedUsage: '用法：/park <内容> — 存起来稍后再问，不会发给 Claude。',
+    parkedNone: '没有待问。',
+    parkedUnknown: (id: string) => `没有 id 为 ${id} 的待问`,
+    parkedUpdated: (what: string, id: string) => `待问 ${id} ${what}`,
   },
   'zh-TW': {
     opened: '面板已開啟。',
@@ -353,6 +399,24 @@ const LABELS = {
     pending: '還差',
     asks: '問你',
     hint: '點 ▸ 展開話題 · 點「等你」裡的問題跳到該話題',
+    parked: '待問',
+    parkedCount: (n: number) => `${n} 條待問`,
+    parkedFill: '填入',
+    parkedCopy: '複製',
+    parkedAsked: '已問',
+    parkedReopen: '恢復',
+    parkedDelete: '刪除',
+    parkedShowAsked: (n: number) => `顯示已問 (${n})`,
+    parkedHideAsked: (n: number) => `隱藏已問 (${n})`,
+    parkedCurrent: '（目前）',
+    parkedCopied: '✓ 已複製',
+    parkedFilled: '✓ 已填入輸入框',
+    parkedFillFailed: '✗ 沒有可填的輸入框',
+    parkedSaved: (n: number) => `已存入待問（共 ${n} 條未問），之後可在面板裡取用。`,
+    parkedUsage: '用法：/park <內容> — 存起來稍後再問，不會送給 Claude。',
+    parkedNone: '沒有待問。',
+    parkedUnknown: (id: string) => `沒有 id 為 ${id} 的待問`,
+    parkedUpdated: (what: string, id: string) => `待問 ${id} ${what}`,
   },
 }
 
@@ -373,6 +437,7 @@ export const register: Register = (on, options) => {
   const L = (typeof options.uiLanguage === 'string' && LABEL_SETS[options.uiLanguage]) || LABELS.en
   const asksOnTop = options.asksOnTop !== false
   const showSummary = options.showSummary !== false
+  const showParked = options.showParked !== false
   const language = typeof options.language === 'string' ? options.language.trim() : ''
   const writeIn = language !== '' ? language : 'the language the user converses in (follow the user)'
 
@@ -517,7 +582,57 @@ export const register: Register = (on, options) => {
       },
       isDeferred: false,
     })
+    await $.tool.register({
+      name: 'park_prompt',
+      description:
+        'Save a question or prompt for the user to ask LATER (a "parked prompt"). Call it ONLY when the user explicitly asks you to park / save / stash something to ask later ' +
+        '(e.g. "save this for later", "park that question", "存起来", "待问"); never on your own initiative. ' +
+        `text: the prompt exactly as the user would send it, in the user's own words and language. It is kept for all repos and sessions and shown in the "${TITLE}" pane under "Parked prompts"; it is not sent anywhere.`,
+      inputSchema: {
+        type: 'object',
+        properties: { text: { type: 'string', description: "The prompt to keep, in the user's own words" } },
+        required: ['text'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'list_parked',
+      description:
+        "Read the user's parked prompts (questions saved to ask later), shared by all repos and sessions. Use it when the user asks to see or pick up their parked prompts " +
+        '(e.g. "show my parked prompts", "把待问拿出来"). Each row: id, repo, session, time, status (open | asked), text. ' +
+        'repo: only that repo; status: open or asked (default: both). Do not act on a parked prompt unless the user chooses it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Only prompts parked in this repo (git top-level directory name)' },
+          status: { type: 'string', enum: ['open', 'asked'], description: 'Only this status; omit for both' },
+        },
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'update_parked',
+      description:
+        'Change one parked prompt by id (from list_parked): status (open | asked; mark asked once the user has asked it), text (rewrite), or delete: true. ' +
+        'Only when the user asks for it or after the user has asked a parked prompt.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          status: { type: 'string', enum: ['open', 'asked'] },
+          text: { type: 'string' },
+          delete: { type: 'boolean', description: 'true removes the prompt' },
+        },
+        required: ['id'],
+      },
+      isDeferred: false,
+    })
     await $.command.register({ name: 'tracker', description: `Open the "${TITLE}" pane` })
+    await $.command.register({
+      name: 'park',
+      description: 'Save a prompt to ask later (not sent to Claude)',
+      argumentHint: '<text>',
+    })
 
     return next(e)
   })
@@ -526,6 +641,57 @@ export const register: Register = (on, options) => {
     await $.ui.open({ id: PANE, title: TITLE })
 
     return { text: L.opened }
+  })
+
+  on('command.run', { command: 'park' }, async ($, e) => {
+    const item = await addParked($, e.args)
+    if (item === undefined) return { text: L.parkedUsage }
+    const open = (await loadParked($)).filter(x => x.status === 'open').length
+    void update($, parkedTick, n => n + 1)
+    void $.ui.open({ id: PANE, title: TITLE })
+
+    return { text: L.parkedSaved(open) }
+  })
+
+  on('tool.call', { tool: PARK_TOOL }, async ($, e): Promise<ToolCallResult> => {
+    const input = e as unknown as { text?: unknown }
+    const item = await addParked($, typeof input.text === 'string' ? input.text : '')
+    if (item === undefined) return { result: L.parkedUsage }
+    const open = (await loadParked($)).filter(x => x.status === 'open').length
+    void update($, parkedTick, n => n + 1)
+    void $.ui.open({ id: PANE, title: TITLE })
+
+    return { result: `${L.parkedSaved(open)} id: ${item.id}, repo: ${item.repo}` }
+  })
+
+  on('tool.call', { tool: LIST_PARKED_TOOL }, async ($, e): Promise<ToolCallResult> => {
+    const input = e as unknown as { repo?: unknown; status?: unknown }
+    const repo = typeof input.repo === 'string' ? input.repo.trim() : ''
+    const status = input.status === 'open' || input.status === 'asked' ? input.status : undefined
+    const rows = (await loadParked($)).filter(x => (repo === '' || x.repo === repo) && (status === undefined || x.status === status))
+    if (rows.length === 0) return { result: L.parkedNone }
+
+    return {
+      result: rows
+        .map(x => `[${x.id}] ${x.repo} / ${x.session.name} · ${parkedStamp(Date.parse(x.created_at))} · ${x.status}\n${x.text}`)
+        .join('\n\n'),
+    }
+  })
+
+  on('tool.call', { tool: UPDATE_PARKED_TOOL }, async ($, e): Promise<ToolCallResult> => {
+    const input = e as unknown as { id?: unknown; status?: unknown; text?: unknown; delete?: unknown }
+    const id = typeof input.id === 'string' ? input.id.trim() : ''
+    const status: ParkedStatus | undefined = input.status === 'open' || input.status === 'asked' ? input.status : undefined
+    const isDelete = input.delete === true
+    const hit = await changeParked($, id, {
+      ...(status !== undefined ? { status } : {}),
+      ...(typeof input.text === 'string' ? { text: input.text } : {}),
+      ...(isDelete ? { delete: true } : {}),
+    })
+    if (hit === undefined) return { result: L.parkedUnknown(id) }
+    void update($, parkedTick, n => n + 1)
+
+    return { result: L.parkedUpdated(isDelete ? 'deleted' : (status ?? 'updated'), id) }
   })
 
   // /compact: the pane stays, and its content goes to the summary
@@ -748,6 +914,10 @@ export const register: Register = (on, options) => {
     const changeList = await read($, changes)
     const flips = await read($, flipped)
     const copiedKey = await read($, copied)
+    await read($, parkedTick)
+    const parkFlips = await read($, parkedFlipped)
+    const parkedAll: Parked[] = showParked ? await loadParked($).catch(() => []) : []
+    const here = parkedAll.length > 0 ? await whereAmI($) : { repo: '', sessionId: '', sessionName: '' }
     const clock = Date.now()
 
     const toggle = (id: string) => () =>
@@ -861,6 +1031,71 @@ export const register: Register = (on, options) => {
       )
     }
 
+
+    // Parked prompts: repo -> session -> items (stored in $.store, shared by every repo and session)
+    const parkedOpenCount = parkedAll.filter(x => x.status === 'open').length
+    const parkFlip = (id: string) => () =>
+      update($, parkedFlipped, ids => (ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]))
+    const parkFlag = (id: string, def: boolean) => def !== parkFlips.includes(id)
+    const flash = (mark: string, id: string) => {
+      void update($, copied, () => `${mark}:${id}`)
+      $.clock.after(1500, () => {
+        void update($, copied, cur => (cur === `${mark}:${id}` ? '' : cur))
+      })
+    }
+    const parkedItem = (item: Parked, indent: number) => (
+      <Box key={`parked-${item.id}`} flexDirection="row" marginLeft={indent}>
+        <Box flexShrink={1}>
+          <Text dimColor={item.status === 'asked'} wrap="truncate-end">
+            {item.status === 'asked' ? '✓ ' : '• '}
+            {clean(item.text).replace(/\s+/g, ' ')}
+            <Text dimColor> · {parkedStamp(Date.parse(item.created_at))}</Text>
+          </Text>
+        </Box>
+        <Button
+          key={`park-fill-${item.id}`}
+          plain
+          dimColor
+          label={` ↵ ${L.parkedFill}${copiedKey === `park-fill:${item.id}` ? ` ${L.parkedFilled}` : copiedKey === `park-nofill:${item.id}` ? ` ${L.parkedFillFailed}` : ''}`}
+          onPress={async () => {
+            const res = await $.prompt.fill({ text: item.text, mode: 'append' })
+            flash(res.isFilled ? 'park-fill' : 'park-nofill', item.id)
+          }}
+        />
+        <Button
+          key={`park-copy-${item.id}`}
+          plain
+          dimColor
+          label={` ⧉ ${L.parkedCopy}${copiedKey === `park-copy:${item.id}` ? ` ${L.parkedCopied}` : copiedKey === `park-copyfail:${item.id}` ? ` ${L.copyFailed}` : ''}`}
+          onPress={async (press: { surface: string }) => {
+            const res = await $.ui.copy({ text: item.text, surface: press.surface as never })
+            flash(res.isCopied ? 'park-copy' : 'park-copyfail', item.id)
+          }}
+        />
+        <Button
+          key={`park-asked-${item.id}`}
+          plain
+          dimColor
+          label={` ${item.status === 'asked' ? `↺ ${L.parkedReopen}` : `✓ ${L.parkedAsked}`}`}
+          onPress={async () => {
+            await changeParked($, item.id, { status: item.status === 'asked' ? 'open' : 'asked' })
+            void update($, parkedTick, n => n + 1)
+          }}
+        />
+        <Button
+          key={`park-del-${item.id}`}
+          plain
+          dimColor
+          label={` ✗ ${L.parkedDelete}`}
+          onPress={async () => {
+            await changeParked($, item.id, { delete: true })
+            void update($, parkedTick, n => n + 1)
+          }}
+        />
+      </Box>
+    )
+    const parkedGroups = groupParked(parkedAll, here.repo, here.sessionId)
+
     const asks = list.flatMap(t =>
       t.status === 'done' ? [] : (t.asks ?? []).map(ask => ({ topic: t, ask })),
     )
@@ -912,6 +1147,57 @@ export const register: Register = (on, options) => {
 
         {showSummary && sessionSummary !== '' && fold('summary', L.summary, sessionSummary.split('\n').filter(x => x.trim() !== '').length)}
         {showSummary && sessionSummary !== '' && !isFolded('summary') && rich(sessionSummary)}
+
+        {parkedAll.length > 0 && fold('parked', L.parked, parkedOpenCount)}
+        {parkedAll.length > 0 &&
+          !isFolded('parked') &&
+          parkedGroups.map(rg => {
+            const isHere = rg.repo === here.repo
+            const askedN = rg.sessions.reduce((n, sg) => n + sg.items.filter(x => x.status === 'asked').length, 0)
+            const openN = rg.count - askedN
+            const showAsked = parkFlag(`asked:${rg.repo}`, false)
+            const repoOpen = parkFlag(`repo:${rg.repo}`, isHere)
+            return (
+              <Box key={`parked-repo-${rg.repo}`} flexDirection="column">
+                <Box flexDirection="row">
+                  <Button
+                    key={`park-repo-${rg.repo}`}
+                    plain
+                    label={`${repoOpen ? '▾' : '▸'} ${rg.repo}${isHere ? L.parkedCurrent : ''} · ${L.parkedCount(openN)}`}
+                    onPress={parkFlip(`repo:${rg.repo}`)}
+                  />
+                  {repoOpen && askedN > 0 && (
+                    <Button
+                      key={`park-showasked-${rg.repo}`}
+                      plain
+                      dimColor
+                      label={` · ${showAsked ? L.parkedHideAsked(askedN) : L.parkedShowAsked(askedN)}`}
+                      onPress={parkFlip(`asked:${rg.repo}`)}
+                    />
+                  )}
+                </Box>
+                {repoOpen &&
+                  rg.sessions.map(sg => {
+                    const items = sg.items.filter(x => showAsked || x.status === 'open')
+                    if (items.length === 0) return null
+                    const isNow = sg.id === here.sessionId
+                    const sessOpen = parkFlag(`sess:${rg.repo}:${sg.id}`, isNow)
+                    return (
+                      <Box key={`parked-sess-${rg.repo}-${sg.id}`} flexDirection="column" marginLeft={2}>
+                        <Button
+                          key={`park-sess-${rg.repo}-${sg.id}`}
+                          plain
+                          dimColor={!isNow}
+                          label={`${sessOpen ? '▾' : '▸'} ${sg.name}${isNow ? L.parkedCurrent : ''} · ${items.length}`}
+                          onPress={parkFlip(`sess:${rg.repo}:${sg.id}`)}
+                        />
+                        {sessOpen && items.map(item => parkedItem(item, 2))}
+                      </Box>
+                    )
+                  })}
+              </Box>
+            )
+          })}
 
         {testingList.length > 0 && fold('testing', L.testing, testingList.length)}
         {(isFolded('testing') ? [] : testingList).map(item => (
