@@ -65,6 +65,8 @@ declare module 'claude-code' {
       changes: LocalChange[]
       flipped: string[]
       copied: string
+      parkedTick: number
+      parkedFlipped: string[]
     }
   }
 }

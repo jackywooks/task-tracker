@@ -1,8 +1,13 @@
 {
   "name": "task-tracker",
-  "version": "0.8.0",
-  "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, a session summary, URLs under test and links to what was created, subagents with their results",
-  "keywords": ["panel", "topics", "tracker", "agents"],
+  "version": "0.9.0",
+  "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, a session summary, URLs under test and links to what was created, subagents with their results, and parked prompts (questions saved to ask later, shared by all repos)",
+  "keywords": [
+    "panel",
+    "topics",
+    "tracker",
+    "agents"
+  ],
   "types": "./types/index.d.ts",
   "userConfig": {
     "title": {
@@ -21,7 +26,12 @@
       "type": "string",
       "title": "Pane label language",
       "description": "Language of the fixed labels on the pane (section names, hints): en, zh (Simplified Chinese, same as zh-CN) or zh-TW (Traditional Chinese). Unknown values fall back to en.",
-      "options": ["en", "zh", "zh-CN", "zh-TW"],
+      "options": [
+        "en",
+        "zh",
+        "zh-CN",
+        "zh-TW"
+      ],
       "default": "en"
     },
     "asksOnTop": {
@@ -40,8 +50,18 @@
       "type": "string",
       "title": "Copy format for Created links",
       "description": "rich: a real hyperlink on the clipboard (HTML + plain text, written through the OS), falling back to Markdown if that fails; markdown: [label](url) text; plain: label and url as text.",
-      "options": ["rich", "markdown", "plain"],
+      "options": [
+        "rich",
+        "markdown",
+        "plain"
+      ],
       "default": "rich"
+    },
+    "showParked": {
+      "type": "boolean",
+      "title": "Show parked prompts",
+      "description": "Show the Parked prompts section (questions saved with /park to ask later) on the pane.",
+      "default": true
     }
   }
 }
