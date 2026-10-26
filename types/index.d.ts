@@ -11,8 +11,14 @@ export type Topic = {
   decided?: string[]
   outputs?: string[]
   pending?: string[]
-  asks?: string[]
+  asks?: Ask[]
 }
+
+// An option button under a question: label is shown, reply (default: label) is the exact text put in the prompt box
+export type AskOption = { label: string; reply?: string }
+
+// A question for the user: a plain string, or a question with option buttons
+export type Ask = string | { question: string; options: AskOption[] }
 
 // A link kept at session level: a URL under test (note) or something created this session (kind: issue / pr / page ...; parent: the url of the epic / parent issue a sub-issue hangs under)
 export type SessionLink = {
@@ -28,6 +34,7 @@ export type SessionLink = {
 export type LocalChange = {
   label: string
   detail?: string
+  path?: string
   cleanup?: boolean
 }
 
@@ -63,6 +70,7 @@ declare module 'claude-code' {
       created: SessionLink[]
       merges: SessionLink[]
       changes: LocalChange[]
+      closedMerges: string[]
       flipped: string[]
       copied: string
       parkedTick: number
