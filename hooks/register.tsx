@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, RenderChildren, ToolCallResult } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, ToolCallResult } from 'claude-code'
 
 import { groupLinks, groupedPayload, singlePayload, writeRich } from './clipboard'
 import type { GroupNames, GroupedPayload } from './clipboard'
@@ -7,7 +7,9 @@ import type { GroupNames, GroupedPayload } from './clipboard'
 import { addParked, changeParked, groupParked, loadParked, stamp as parkedStamp, whereAmI } from './parked'
 import type { Parked, ParkedStatus } from './parked'
 
-import type { AgentRun, AgentRunStatus, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
+import { applyMergeStates, askOptions, askText, checkPrs, fillMode, isPrUrl, optionReply } from './merges'
+
+import type { AgentRun, AgentRunStatus, Ask, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
 
 const PANE = 'task-tracker'
 const TOPICS_TOOL: string = 'mcp__task-tracker__set_topics'
@@ -27,6 +29,8 @@ const testing = atom({ plugin: 'task-tracker', key: 'testing' } as const, [])
 const created = atom({ plugin: 'task-tracker', key: 'created' } as const, [])
 const merges = atom({ plugin: 'task-tracker', key: 'merges' } as const, [])
 const changes = atom({ plugin: 'task-tracker', key: 'changes' } as const, [])
+// Urls of awaiting-merge PRs that GitHub reports closed without merging (shown with a `closed` badge)
+const closedMerges = atom({ plugin: 'task-tracker', key: 'closedMerges' } as const, [])
 // Section ids the person flipped away from their default (Local changes defaults to folded, the rest to open)
 const flipped = atom({ plugin: 'task-tracker', key: 'flipped' } as const, [])
 const copied = atom({ plugin: 'task-tracker', key: 'copied' } as const, '')
@@ -114,6 +118,33 @@ function strings(raw: unknown): string[] | undefined {
   return list
 }
 
+// asks[] items are strings or {question, options: [{label, reply?}]}; a question without usable options stays a plain string
+function toAsks(raw: unknown): Ask[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: Ask[] = []
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      if (item.trim() !== '') out.push(item)
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const question = typeof o.question === 'string' ? o.question.trim() : ''
+    if (question === '') continue
+    const options = (Array.isArray(o.options) ? o.options : []).flatMap(opt => {
+      if (!opt || typeof opt !== 'object') return []
+      const r = opt as Record<string, unknown>
+      const label = typeof r.label === 'string' ? r.label.trim() : ''
+      if (label === '') return []
+      const one: { label: string; reply?: string } = { label }
+      if (typeof r.reply === 'string' && r.reply.trim() !== '') one.reply = r.reply.trim()
+      return [one]
+    })
+    out.push(options.length > 0 ? { question, options } : question)
+  }
+  return out
+}
+
 function toLink(raw: unknown): SessionLink | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const o = raw as Record<string, unknown>
@@ -147,6 +178,7 @@ function toChange(raw: unknown): LocalChange | undefined {
   if (label === '') return undefined
   const change: LocalChange = { label }
   if (typeof o.detail === 'string' && o.detail.trim() !== '') change.detail = o.detail.trim()
+  if (typeof o.path === 'string' && o.path.trim() !== '') change.path = o.path.trim()
   if (o.cleanup === true) change.cleanup = true
   return change
 }
@@ -175,10 +207,12 @@ function toTopic(raw: unknown): Topic | undefined {
   }
   if (typeof o.line === 'string' && o.line) topic.line = o.line
   if (typeof o.background === 'string' && o.background) topic.background = o.background
-  for (const key of ['decided', 'outputs', 'pending', 'asks'] as const) {
+  for (const key of ['decided', 'outputs', 'pending'] as const) {
     const list = strings(o[key])
     if (list !== undefined) topic[key] = list
   }
+  const asks = toAsks(o.asks)
+  if (asks !== undefined) topic.asks = asks
   return topic
 }
 
@@ -222,7 +256,10 @@ function boardText(
     for (const d of t.decided ?? []) lines.push(`  Decided: ${d}`)
     for (const o of t.outputs ?? []) lines.push(`  Output: ${o}`)
     for (const p of t.pending ?? []) lines.push(`  Pending: ${p}`)
-    for (const a of t.asks ?? []) lines.push(`  Ask: ${a}`)
+    for (const a of t.asks ?? []) {
+      const opts = askOptions(a)
+      lines.push(`  Ask: ${askText(a)}${opts.length > 0 ? ` [options: ${opts.map(x => x.label).join(' | ')}]` : ''}`)
+    }
     for (const run of runs.filter(r => r.topic === t.id && r.summary?.length)) {
       lines.push(`  agent "${run.description}": ${(run.summary ?? []).join('; ')}`)
     }
@@ -232,7 +269,7 @@ function boardText(
   for (const c of session.created) lines.push(`Created${c.kind ? ` ${c.kind}` : ''}: ${c.label} ${c.url}${c.parent ? ` (under ${c.parent})` : ''}`)
   for (const m of session.merges) lines.push(`Awaiting merge: ${m.label} ${m.url}${m.topic ? ` (topic ${m.topic})` : ''}`)
   for (const c of session.changes) {
-    lines.push(`Local change${c.cleanup ? ' (to clean up)' : ''}: ${c.label}${c.detail ? ` - ${c.detail}` : ''}`)
+    lines.push(`Local change${c.cleanup ? ' (to clean up)' : ''}: ${c.label}${c.detail ? ` - ${c.detail}` : ''}${c.path ? ` [${c.path}]` : ''}`)
   }
   return lines.join('\n')
 }
@@ -297,6 +334,12 @@ const LABELS = {
     parkedNone: 'No parked prompts.',
     parkedUnknown: (id: string) => `No parked prompt with id ${id}`,
     parkedUpdated: (what: string, id: string) => `Parked prompt ${id} ${what}`,
+    cleanBtn: 'clean',
+    cleanRequest: (label: string, where: string) => `Please clean up: ${label}${where ? ` (${where})` : ''}`,
+    prMerged: (label: string) => `PR merged: ${label}`,
+    prClosed: 'closed',
+    putIn: '✓ Put in the prompt box',
+    putCopied: '✓ Copied (no prompt box)',
   },
   zh: {
     opened: '面板已打开。',
@@ -357,6 +400,12 @@ const LABELS = {
     parkedNone: '没有待问。',
     parkedUnknown: (id: string) => `没有 id 为 ${id} 的待问`,
     parkedUpdated: (what: string, id: string) => `待问 ${id} ${what}`,
+    cleanBtn: '清理',
+    cleanRequest: (label: string, where: string) => `请清理：${label}${where ? `（${where}）` : ''}`,
+    prMerged: (label: string) => `PR 已合并：${label}`,
+    prClosed: '已关闭',
+    putIn: '✓ 已填入输入框',
+    putCopied: '✓ 已复制（没有输入框）',
   },
   'zh-TW': {
     opened: '面板已開啟。',
@@ -417,6 +466,12 @@ const LABELS = {
     parkedNone: '沒有待問。',
     parkedUnknown: (id: string) => `沒有 id 為 ${id} 的待問`,
     parkedUpdated: (what: string, id: string) => `待問 ${id} ${what}`,
+    cleanBtn: '清理',
+    cleanRequest: (label: string, where: string) => `請清理：${label}${where ? `（${where}）` : ''}`,
+    prMerged: (label: string) => `PR 已合併：${label}`,
+    prClosed: '已關閉',
+    putIn: '✓ 已填入輸入框',
+    putCopied: '✓ 已複製（沒有輸入框）',
   },
 }
 
@@ -432,16 +487,65 @@ const LABEL_SETS: Record<string, Labels> = {
   'zh-TW': LABELS['zh-TW'],
 }
 
+// Auto-detect merged PRs: read-only `gh pr view` for the awaiting-merge PR urls, sequential, only while merges is non-empty
+type MergeWatch = { minutes: number; merged: (label: string) => string; timer?: { cancel: () => void }; checking: boolean }
+
+function stopMergeWatch(w: MergeWatch): void {
+  w.timer?.cancel()
+  delete w.timer
+}
+
+async function runMergeCheck($: EngineInterface, w: MergeWatch): Promise<void> {
+  if (w.checking || w.minutes === 0) return
+  w.checking = true
+  try {
+    const targets = (await read($, merges)).filter(x => isPrUrl(x.url))
+    if (targets.length === 0) {
+      stopMergeWatch(w)
+      return
+    }
+    const states = await checkPrs($, targets)
+    const gone = applyMergeStates(targets, states).merged
+    await update($, merges, cur => applyMergeStates(cur, states).remaining)
+    await update($, closedMerges, cur => {
+      const keep = cur.filter(url => states[url] === undefined || states[url] === 'unknown')
+      const closedNow = Object.keys(states).filter(url => states[url] === 'closed')
+      return [...new Set([...keep, ...closedNow])].filter(url => !gone.some(m => m.url === url))
+    })
+    for (const one of gone) $.ui.toast(w.merged(clean(one.label)))
+    if (!(await read($, merges)).some(x => isPrUrl(x.url))) stopMergeWatch(w)
+  } catch {
+    // display only: a failed check is skipped until the next period
+  } finally {
+    w.checking = false
+  }
+}
+
+function watchMerges($: EngineInterface, w: MergeWatch, checkNow: boolean): void {
+  if (w.minutes === 0) return
+  if (w.timer === undefined) w.timer = $.clock.every(w.minutes * 60000, () => void runMergeCheck($, w))
+  if (checkNow) void runMergeCheck($, w)
+}
+
 export const register: Register = (on, options) => {
   const TITLE = typeof options.title === 'string' && options.title.trim() !== '' ? options.title.trim() : 'Task Tracker'
   const L = (typeof options.uiLanguage === 'string' && LABEL_SETS[options.uiLanguage]) || LABELS.en
   const asksOnTop = options.asksOnTop !== false
   const showSummary = options.showSummary !== false
   const showParked = options.showParked !== false
+  const rawMinutes = typeof options.mergeCheckMinutes === 'string' ? Number(options.mergeCheckMinutes) : options.mergeCheckMinutes
+  const mergeMinutes = typeof rawMinutes === 'number' && Number.isFinite(rawMinutes) && rawMinutes >= 0 ? rawMinutes : 5
   const language = typeof options.language === 'string' ? options.language.trim() : ''
   const writeIn = language !== '' ? language : 'the language the user converses in (follow the user)'
 
+  const watch: MergeWatch = { minutes: mergeMinutes, merged: L.prMerged, checking: false }
+
   on('session.start', async ($, e, next) => {
+    try {
+      if ((await read($, merges)).some(x => isPrUrl(x.url))) watchMerges($, watch, true)
+    } catch {
+      // display only
+    }
     await $.tool.register({
       name: 'set_topics',
       description:
@@ -454,7 +558,9 @@ export const register: Register = (on, options) => {
         'todo | done), line (one short line: where it stands now), background (one or two sentences: what it is about), ' +
         'decided[] (decisions made, with who chose), outputs[] (what was produced: issue / PR / comment / file / page, ' +
         'with the full URL so it is clickable), pending[] (what is still left), asks[] (questions the user must answer; ' +
-        'they are collected at the top of the pane). One open question = one card: when a topic spawns several things the ' +
+        'they are collected at the top of the pane; each is a plain string, or {question, options: [{label, reply?}]} to show answer buttons: ' +
+        'give 2-4 options, put the recommended one first with "(recommended)" in its label, and reply = the exact answer text the user would type ' +
+        '(defaults to label); clicking an option only fills the prompt box, it never sends). One open question = one card: when a topic spawns several things the ' +
         'user must decide, give each its own card whose background says what it is and why it needs deciding (with links), ' +
         'and whose asks[] holds the full question with options and your recommendation; keep a separate overview card for ' +
         'the whole topic instead of piling short asks onto it. When the question changes (a new draft, a new option), ' +
@@ -480,7 +586,32 @@ export const register: Register = (on, options) => {
                 decided: { type: 'array', items: { type: 'string' } },
                 outputs: { type: 'array', items: { type: 'string' } },
                 pending: { type: 'array', items: { type: 'string' } },
-                asks: { type: 'array', items: { type: 'string' } },
+                asks: {
+                  type: 'array',
+                  items: {
+                    anyOf: [
+                      { type: 'string' },
+                      {
+                        type: 'object',
+                        properties: {
+                          question: { type: 'string' },
+                          options: {
+                            type: 'array',
+                            items: {
+                              type: 'object',
+                              properties: {
+                                label: { type: 'string', description: 'Button text; the recommended option first, with "(recommended)"' },
+                                reply: { type: 'string', description: 'Exact answer text put in the prompt box; defaults to label' },
+                              },
+                              required: ['label'],
+                            },
+                          },
+                        },
+                        required: ['question', 'options'],
+                      },
+                    ],
+                  },
+                },
               },
               required: ['id'],
             },
@@ -519,9 +650,9 @@ export const register: Register = (on, options) => {
         'created[]: links to things created in this session ({label, url, kind?, parent?}); whenever you create an issue, PR or page, add its full URL right after. ' +
         'kind is issue, pr or something else such as page (when omitted it is inferred from the url: /pull/ is a PR, /issues/ is an issue, anything else goes under Other). ' +
         'The pane groups Created into Issues (numbered), PRs and Other; when you create a sub-issue, set parent to the url of its epic / parent issue so it is listed under it. ' +
-        'merges[]: pull requests opened in this session that still wait for the user to merge ({label, url, topic?} with topic the id of the owning topic); add one when you open a PR, and remove it from the awaiting-merge list with merged_urls once the user says it is merged (it stays under created). ' +
-        'changes[]: changes left on the user\'s machine that outlive the session ({label, detail?, cleanup?}): a registered scheduled task, an environment variable set, an account or credential switched, a deployed service (detail: version or commit), a memory written, and so on; ' +
-        'record one whenever you make such a change, set cleanup: true on temporary leftovers that still have to be cleaned up (temporary worktree or branch, test session, temporary directory) so they stand out, and remove the entry (remove_labels) once it is cleaned up or no longer applies. ' +
+        'merges[]: pull requests opened in this session that still wait for the user to merge ({label, url, topic?} with topic the id of the owning topic); add one when you open a PR, and remove it from the awaiting-merge list with merged_urls once the user says it is merged (it stays under created); the pane also checks GitHub PR urls itself with the local gh login and drops merged ones, so you only need merged_urls for other urls. ' +
+        'changes[]: changes left on the user\'s machine that outlive the session ({label, detail?, path?, cleanup?}): a registered scheduled task, an environment variable set, an account or credential switched, a deployed service (detail: version or commit), a memory written, and so on; ' +
+        'record one whenever you make such a change, set cleanup: true on temporary leftovers that still have to be cleaned up (temporary worktree or branch, test session, temporary directory) so they stand out (an entry with cleanup: true gets a clean button in the pane that only puts a cleanup request in the prompt box; you do the cleaning through normal permissions), set path to what to clean (directory, worktree or branch) so the cleanup request is precise, and remove the entry (remove_labels) once it is cleaned up or no longer applies. ' +
         'testing, created and merges entries merge by url, changes entries by label (a repeat replaces the old entry); untest_urls[] deletes entries from testing only; merged_urls[] deletes entries from merges only (the user said the PR is merged); remove_urls[] deletes entries from testing, created and merges all at once, generally for entries added by mistake; remove_labels[] deletes entries from changes. ' +
         'Pass only what changed. ' +
         `Write labels, notes and the summary in ${writeIn}, each line short; never use circled digits.`,
@@ -569,6 +700,7 @@ export const register: Register = (on, options) => {
               properties: {
                 label: { type: 'string' },
                 detail: { type: 'string' },
+                path: { type: 'string', description: 'What to clean (directory, worktree or branch), so the cleanup request is precise' },
                 cleanup: { type: 'boolean', description: 'true: still to be cleaned up' },
               },
               required: ['label'],
@@ -732,6 +864,7 @@ export const register: Register = (on, options) => {
         await update($, created, () => [])
         await update($, merges, () => [])
         await update($, changes, () => [])
+        await update($, closedMerges, () => [])
         await update($, updatedAt, () => '')
       } catch {
         // display only
@@ -870,6 +1003,8 @@ export const register: Register = (on, options) => {
     })
     await update($, updatedAt, () => stamp)
     void $.ui.open({ id: PANE, title: TITLE })
+    if (m > 0) watchMerges($, watch, Array.isArray(input.merges) && input.merges.length > 0)
+    else stopMergeWatch(watch)
 
     return { result: L.sessionUpdated(t, c, m, k) }
   })
@@ -912,6 +1047,7 @@ export const register: Register = (on, options) => {
     const createdList = await read($, created)
     const mergeList = await read($, merges)
     const changeList = await read($, changes)
+    const closedList = await read($, closedMerges)
     const flips = await read($, flipped)
     const copiedKey = await read($, copied)
     await read($, parkedTick)
@@ -1043,6 +1179,19 @@ export const register: Register = (on, options) => {
         void update($, copied, cur => (cur === `${mark}:${id}` ? '' : cur))
       })
     }
+    // Put text in the prompt box (never sends); with no box to fill, copy it instead
+    const putText = async (id: string, text: string, mode: 'replace' | 'append' | 'auto', press: { surface: string }) => {
+      const draft = mode === 'auto' ? await $.prompt.read().then(x => x.text, () => '') : ''
+      const res = await $.prompt.fill({ text, mode: mode === 'auto' ? fillMode(draft) : mode })
+      if (res.isFilled) {
+        flash('put-ok', id)
+        return
+      }
+      const copy = await $.ui.copy({ text, surface: press.surface as never })
+      flash(copy.isCopied ? 'put-copied' : 'put-fail', id)
+    }
+    const putMark = (id: string) =>
+      copiedKey === `put-ok:${id}` ? ` ${L.putIn}` : copiedKey === `put-copied:${id}` ? ` ${L.putCopied}` : copiedKey === `put-fail:${id}` ? ` ✗ ${L.copyFailed}` : ''
     const parkedItem = (item: Parked, indent: number) => (
       <Box key={`parked-${item.id}`} flexDirection="row" marginLeft={indent}>
         <Box flexShrink={1}>
@@ -1120,9 +1269,21 @@ export const register: Register = (on, options) => {
             <Button
               key={`ask-btn-${i}`}
               plain
-              label={`? ${clean(ask)}`}
+              label={`? ${clean(askText(ask))}`}
               onPress={reveal(topic.id)}
             />
+            {askOptions(ask).length > 0 && (
+              <Box flexDirection="row" flexWrap="wrap" marginLeft={2}>
+                {askOptions(ask).map((opt, j) => (
+                  <Button
+                    key={`ask-opt-${i}-${j}`}
+                    plain
+                    label={`[ ${clean(opt.label)} ]${putMark(`ask-${i}-${j}`)} `}
+                    onPress={(press: { surface: string }) => putText(`ask-${i}-${j}`, optionReply(opt), 'auto', press)}
+                  />
+                ))}
+              </Box>
+            )}
             <Text dimColor>
               {'    '}← {topic.id}. {topic.title}
             </Text>
@@ -1138,6 +1299,7 @@ export const register: Register = (on, options) => {
               <Box flexShrink={1}>
                 <Text>
                   <Link href={item.url}>{clean(item.label)}</Link>
+                  {closedList.includes(item.url) ? <Text color="error"> [{L.prClosed}]</Text> : ''}
                   {owner ? ` · ← ${owner.id}. ${clean(owner.title)}` : ''}
                 </Text>
               </Box>
@@ -1281,8 +1443,19 @@ export const register: Register = (on, options) => {
                 {item.cleanup ? <Text color="warning" bold>[{L.cleanup}] </Text> : ''}
                 {clean(item.label)}
                 {item.detail ? ` · ${clean(item.detail)}` : ''}
+                {item.path ? ` · ${clean(item.path)}` : ''}
               </Text>
             </Box>
+            {item.cleanup === true && (
+              <Button
+                key={`clean-${item.label}`}
+                plain
+                label={` 🧹 ${L.cleanBtn}${putMark(`clean-${item.label}`)}`}
+                onPress={(press: { surface: string }) =>
+                  putText(`clean-${item.label}`, L.cleanRequest(item.label, item.path ?? item.detail ?? ''), 'append', press)
+                }
+              />
+            )}
           </Box>
         ))}
 
@@ -1312,7 +1485,7 @@ export const register: Register = (on, options) => {
                   {group(L.decided, 'success', t.decided)}
                   {group(L.outputs, 'success', t.outputs)}
                   {group(L.pending, 'warning', t.pending)}
-                  {group(L.asks, 'warning', t.asks, '? ')}
+                  {group(L.asks, 'warning', t.asks?.map(askText), '? ')}
                   {mine.map(run => agentRow(run, 0))}
                 </Box>
               )}
