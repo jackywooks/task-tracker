@@ -7,6 +7,17 @@ import type { GroupNames, GroupedPayload } from './clipboard'
 import { addParked, changeParked, groupParked, loadParked, stamp as parkedStamp, whereAmI } from './parked'
 import type { Parked, ParkedStatus } from './parked'
 
+import {
+  RECORD_PREFIX,
+  isEmptyData,
+  loadRecords,
+  pickFallback,
+  pruneRecords,
+  saveRecord,
+  toRecord,
+} from './persist'
+import type { PaneData } from './persist'
+
 import { applyMergeStates, askOptions, askText, checkPrs, fillMode, isPrUrl, optionReply } from './merges'
 
 import type { AgentRun, AgentRunStatus, Ask, LocalChange, SessionLink, Topic, TopicStatus } from '../types'
@@ -38,6 +49,12 @@ const copied = atom({ plugin: 'task-tracker', key: 'copied' } as const, '')
 const parkedTick = atom({ plugin: 'task-tracker', key: 'parkedTick' } as const, 0)
 // Group ids the person flipped away from their default (current repo / session open, others folded; 'asked:<repo>' shows asked items)
 const parkedFlipped = atom({ plugin: 'task-tracker', key: 'parkedFlipped' } as const, [])
+
+// Pane persistence: when the pane was put back from the store ('' = it was not), whether the last write failed (store
+// full), and the one record offered for a one-click restore when no record carries this session's id
+const restoredNote = atom({ plugin: 'task-tracker', key: 'restoredNote' } as const, '')
+const saveWarning = atom({ plugin: 'task-tracker', key: 'saveWarning' } as const, false)
+const restoreOffer = atom({ plugin: 'task-tracker', key: 'restoreOffer' } as const, [])
 
 const FOLDED_BY_DEFAULT = ['changes']
 
@@ -287,6 +304,9 @@ const LABELS = {
     stats: (n: number, done: number) => `This session · ${n} topic(s) · ${done} done`,
     updatedAt: (t: string) => ` · updated ${t}`,
     empty: 'No topics yet.',
+    restored: (t: string) => `Restored after a restart (saved ${t})`,
+    restoreOffer: (t: string, n: number) => `Restore the last pane of this folder (saved ${t}, ${n} topic(s))`,
+    saveFailed: '⚠ The pane could not be saved (plugin store full); it will be lost on restart',
     needsYou: 'Needs you',
     topics: 'Topics',
     summary: 'Summary',
@@ -353,6 +373,9 @@ const LABELS = {
     stats: (n: number, done: number) => `本会话 · ${n} 个话题 · ${done} 个完成`,
     updatedAt: (t: string) => ` · ${t} 更新`,
     empty: '还没有话题。',
+    restored: (t: string) => `已在重启后恢复（保存于 ${t}）`,
+    restoreOffer: (t: string, n: number) => `恢复此目录上次的面板（保存于 ${t}，${n} 个话题）`,
+    saveFailed: '⚠ 面板无法保存（插件存储已满），重启后会丢失',
     needsYou: '等你',
     topics: '话题',
     summary: '总结',
@@ -419,6 +442,9 @@ const LABELS = {
     stats: (n: number, done: number) => `本工作階段 · ${n} 個話題 · ${done} 個完成`,
     updatedAt: (t: string) => ` · ${t} 更新`,
     empty: '還沒有話題。',
+    restored: (t: string) => `已在重新啟動後還原（儲存於 ${t}）`,
+    restoreOffer: (t: string, n: number) => `還原此資料夾上次的面板（儲存於 ${t}，${n} 個話題）`,
+    saveFailed: '⚠ 面板無法儲存（外掛儲存空間已滿），重新啟動後會遺失',
     needsYou: '等你',
     topics: '話題',
     summary: '總結',
@@ -487,6 +513,139 @@ const LABEL_SETS: Record<string, Labels> = {
   'zh-TW': LABELS['zh-TW'],
 }
 
+// ---- Pane persistence -------------------------------------------------------------------------------------------
+// Write-through: every mutation ends in requestSave; writes are coalesced (a burst of calls is one more write) and
+// the tool handlers await it, so the record is in the store before the tool call returns.
+type Persist = { days: number; hours: number }
+
+const saving: { dirty: boolean; running?: Promise<void> } = { dirty: false }
+let restoring: Promise<void> | undefined
+let clearedHere = false
+
+async function snapshot($: EngineInterface): Promise<PaneData> {
+  return {
+    topics: await read($, topics),
+    now: await read($, now),
+    summary: await read($, summary),
+    testing: await read($, testing),
+    created: await read($, created),
+    merges: await read($, merges),
+    changes: await read($, changes),
+    agents: await read($, agents),
+    closedMerges: await read($, closedMerges),
+    updatedAt: await read($, updatedAt),
+  }
+}
+
+async function applyData($: EngineInterface, d: PaneData): Promise<void> {
+  await update($, topics, () => d.topics)
+  await update($, now, () => d.now)
+  await update($, summary, () => d.summary)
+  await update($, testing, () => d.testing)
+  await update($, created, () => d.created)
+  await update($, merges, () => d.merges)
+  await update($, changes, () => d.changes)
+  await update($, agents, () => d.agents)
+  await update($, closedMerges, () => d.closedMerges)
+  await update($, updatedAt, () => d.updatedAt)
+}
+
+async function writeNow($: EngineInterface): Promise<void> {
+  const at = await whereAmI($)
+  if (at.sessionId === '' || at.sessionId === at.sessionName) return
+  const data = await snapshot($)
+  const key = RECORD_PREFIX + at.sessionId
+  if (isEmptyData(data)) {
+    await $.store.delete(key)
+    await update($, saveWarning, () => false)
+    return
+  }
+  const cwd = await $.session.cwd().catch(() => '')
+  const result = await saveRecord($, at.sessionId, {
+    v: 1,
+    repo: at.repo,
+    cwd,
+    sessionName: at.sessionName,
+    savedAt: Date.now(),
+    data,
+  })
+  await update($, saveWarning, () => result === 'full')
+}
+
+function requestSave($: EngineInterface): Promise<void> {
+  saving.dirty = true
+  saving.running ??= (async () => {
+    try {
+      while (saving.dirty) {
+        saving.dirty = false
+        try {
+          await writeNow($)
+        } catch {
+          await update($, saveWarning, () => true).catch(() => undefined)
+        }
+      }
+    } finally {
+      delete saving.running
+    }
+  })()
+
+  return saving.running
+}
+
+// Once per plugin start (and hot reload): put the stored pane back into EMPTY atoms. Atoms that already hold data
+// (a hot reload) are never overwritten. No record under this session's id: offer the newest record of the same repo
+// and working directory (see pickFallback) as a button, never silently.
+function ensureRestored($: EngineInterface, cfg: Persist): Promise<void> {
+  restoring ??= (async () => {
+    try {
+      const at = await whereAmI($)
+      if (at.sessionId === '' || at.sessionId === at.sessionName) return
+      if (!isEmptyData(await snapshot($))) return
+      const exact = toRecord(await $.store.get(RECORD_PREFIX + at.sessionId))
+      if (exact !== undefined && !isEmptyData(exact.data)) {
+        await applyData($, exact.data)
+        await update($, restoredNote, () => parkedStamp(exact.savedAt))
+        return
+      }
+      if (clearedHere) return
+      const cwd = await $.session.cwd().catch(() => '')
+      const pick = pickFallback(await loadRecords($), {
+        repo: at.repo,
+        cwd,
+        hours: cfg.hours,
+        nowMs: Date.now(),
+        excludeId: at.sessionId,
+      })
+      if (pick !== undefined) {
+        await update($, restoreOffer, () => [
+          { id: pick.id, savedAt: pick.rec.savedAt, topics: pick.rec.data.topics.length },
+        ])
+      }
+    } catch {
+      // display only: the pane works without a restore
+    }
+  })()
+
+  return restoring
+}
+
+async function acceptOffer($: EngineInterface, id: string): Promise<void> {
+  try {
+    const key = RECORD_PREFIX + id
+    const rec = toRecord(await $.store.get(key))
+    if (rec !== undefined && isEmptyData(await snapshot($))) {
+      await applyData($, rec.data)
+      await update($, restoredNote, () => parkedStamp(rec.savedAt))
+      await requestSave($)
+      // moved, not copied: the record now lives under this session's id (kept if that write failed)
+      if (!(await read($, saveWarning))) await $.store.delete(key)
+    }
+  } catch {
+    // display only
+  }
+  await update($, restoreOffer, () => [])
+}
+
 // Auto-detect merged PRs: read-only `gh pr view` for the awaiting-merge PR urls, sequential, only while merges is non-empty
 type MergeWatch = { minutes: number; merged: (label: string) => string; timer?: { cancel: () => void }; checking: boolean }
 
@@ -507,11 +666,13 @@ async function runMergeCheck($: EngineInterface, w: MergeWatch): Promise<void> {
     const states = await checkPrs($, targets)
     const gone = applyMergeStates(targets, states).merged
     await update($, merges, cur => applyMergeStates(cur, states).remaining)
+    void requestSave($)
     await update($, closedMerges, cur => {
       const keep = cur.filter(url => states[url] === undefined || states[url] === 'unknown')
       const closedNow = Object.keys(states).filter(url => states[url] === 'closed')
       return [...new Set([...keep, ...closedNow])].filter(url => !gone.some(m => m.url === url))
     })
+    void requestSave($)
     for (const one of gone) $.ui.toast(w.merged(clean(one.label)))
     if (!(await read($, merges)).some(x => isPrUrl(x.url))) stopMergeWatch(w)
   } catch {
@@ -538,9 +699,23 @@ export const register: Register = (on, options) => {
   const language = typeof options.language === 'string' ? options.language.trim() : ''
   const writeIn = language !== '' ? language : 'the language the user converses in (follow the user)'
 
+  const days = Number(options.paneRetentionDays)
+  const hours = Number(options.paneRestoreHours)
+  const cfg: Persist = {
+    days: Number.isFinite(days) && days >= 0 && options.paneRetentionDays !== '' ? days : 14,
+    hours: Number.isFinite(hours) && hours >= 0 && options.paneRestoreHours !== '' ? hours : 24,
+  }
+
   const watch: MergeWatch = { minutes: mergeMinutes, merged: L.prMerged, checking: false }
 
   on('session.start', async ($, e, next) => {
+    await ensureRestored($, cfg)
+    try {
+      const at = await whereAmI($)
+      await pruneRecords($, { days: cfg.days, nowMs: Date.now(), keepId: at.sessionId })
+    } catch {
+      // display only: pruning is housekeeping
+    }
     try {
       if ((await read($, merges)).some(x => isPrUrl(x.url))) watchMerges($, watch, true)
     } catch {
@@ -852,7 +1027,12 @@ export const register: Register = (on, options) => {
   // /clear: new work, the pane is emptied
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
+      clearedHere = true
       try {
+        await saving.running
+        await $.store.delete(RECORD_PREFIX + e.sessionId)
+        await update($, restoredNote, () => '')
+        await update($, restoreOffer, () => [])
         await update($, topics, () => [])
         await update($, agents, () => [])
         await update($, expanded, () => [])
@@ -893,6 +1073,7 @@ export const register: Register = (on, options) => {
       if (result.agentId !== undefined) run.agentId = result.agentId
       await update($, agents, list => [...list, run].slice(-AGENT_KEEP))
       void $.ui.open({ id: PANE, title: TITLE })
+      void requestSave($)
     } catch {
       // display only: a failed record must not block the agent
     }
@@ -911,6 +1092,7 @@ export const register: Register = (on, options) => {
               : run,
           ),
         )
+        void requestSave($)
       } catch {
         // display only: a failed count must not block the tool call
       }
@@ -931,6 +1113,7 @@ export const register: Register = (on, options) => {
               : run,
           ),
         )
+        void requestSave($)
       } catch {
         // display only
       }
@@ -945,6 +1128,7 @@ export const register: Register = (on, options) => {
     const points = (strings(input.points) ?? []).slice(0, 6)
     const topic = typeof input.topic === 'string' ? input.topic.trim() : ''
     let matched = ''
+    await ensureRestored($, cfg)
     await update($, agents, list => {
       const idx = [...list].reverse().findIndex(run => key !== '' && run.description.includes(key))
       if (idx < 0) return list
@@ -953,6 +1137,7 @@ export const register: Register = (on, options) => {
       return list.map((run, i) => (i === real ? { ...run, summary: points, ...(topic ? { topic } : {}) } : run))
     })
     if (matched === '') return { result: L.noAgent(key) }
+    await requestSave($)
     void $.ui.open({ id: PANE, title: TITLE })
 
     return { result: L.recorded(matched, points.length) }
@@ -976,6 +1161,7 @@ export const register: Register = (on, options) => {
     const removeLabels = strings(input.remove_labels) ?? []
     const clock = new Date()
     const stamp = `${String(clock.getHours()).padStart(2, '0')}:${String(clock.getMinutes()).padStart(2, '0')}`
+    await ensureRestored($, cfg)
     if (typeof input.summary === 'string') await update($, summary, () => (input.summary as string).trim())
     let t = 0
     let c = 0
@@ -1002,6 +1188,7 @@ export const register: Register = (on, options) => {
       return next
     })
     await update($, updatedAt, () => stamp)
+    await requestSave($)
     void $.ui.open({ id: PANE, title: TITLE })
     if (m > 0) watchMerges($, watch, Array.isArray(input.merges) && input.merges.length > 0)
     else stopMergeWatch(watch)
@@ -1019,6 +1206,7 @@ export const register: Register = (on, options) => {
     const clock = new Date()
     const stamp = `${String(clock.getHours()).padStart(2, '0')}:${String(clock.getMinutes()).padStart(2, '0')}`
     let total = 0
+    await ensureRestored($, cfg)
     await update($, topics, list => {
       const next = merge(
         list,
@@ -1030,6 +1218,7 @@ export const register: Register = (on, options) => {
     })
     if (typeof input.now === 'string') await update($, now, () => (input.now as string).trim())
     await update($, updatedAt, () => stamp)
+    await requestSave($)
     void $.ui.open({ id: PANE, title: TITLE })
 
     return { result: L.updated(pairs.length, total) }
@@ -1037,6 +1226,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Link } = $.ui.resolve(e)
+    await ensureRestored($, cfg)
     const list = await read($, topics)
     const current = await read($, now)
     const stamp = await read($, updatedAt)
@@ -1048,6 +1238,9 @@ export const register: Register = (on, options) => {
     const mergeList = await read($, merges)
     const changeList = await read($, changes)
     const closedList = await read($, closedMerges)
+    const restoredAtText = await read($, restoredNote)
+    const saveFailed = await read($, saveWarning)
+    const offers = await read($, restoreOffer)
     const flips = await read($, flipped)
     const copiedKey = await read($, copied)
     await read($, parkedTick)
@@ -1259,6 +1452,16 @@ export const register: Register = (on, options) => {
           {L.stats(list.length, done)}
           {stamp ? L.updatedAt(stamp) : ''}
         </Text>
+        {restoredAtText !== '' && <Text dimColor>{L.restored(restoredAtText)}</Text>}
+        {saveFailed && <Text color="warning">{L.saveFailed}</Text>}
+        {offers.map(o => (
+          <Button
+            key={`restore-${o.id}`}
+            plain
+            label={`↺ ${L.restoreOffer(parkedStamp(o.savedAt), o.topics)}`}
+            onPress={() => acceptOffer($, o.id)}
+          />
+        ))}
         {list.length === 0 && sessionSummary === '' && testingList.length + createdList.length + mergeList.length + changeList.length === 0 && (
           <Text dimColor>{L.empty}</Text>
         )}
