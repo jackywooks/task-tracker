@@ -1,6 +1,6 @@
 {
   "name": "task-tracker",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Side pane that records the current session: one card per topic (what was decided, produced, still pending), questions for you on top, a session summary, URLs under test and links to what was created, subagents with their results, and parked prompts (questions saved to ask later, shared by all repos)",
   "keywords": [
     "panel",
@@ -68,6 +68,18 @@
       "title": "PR merge check interval (minutes)",
       "description": "How often to check the PRs under Awaiting merge with the local gh login (read-only gh pr view) and drop merged ones. 0 turns it off.",
       "default": 5
+    },
+    "paneRetentionDays": {
+      "type": "number",
+      "title": "Pane retention (days)",
+      "description": "The pane is saved after every change and put back after a restart. Saved panes older than this many days are deleted when a session starts. 0 deletes every older pane at once.",
+      "default": 14
+    },
+    "paneRestoreHours": {
+      "type": "number",
+      "title": "Pane restore window (hours)",
+      "description": "If a restarted session has a new session id, the newest saved pane of the same repo and folder from the last this many hours is offered as a one-click restore button.",
+      "default": 24
     }
   }
 }

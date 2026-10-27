@@ -75,6 +75,9 @@ declare module 'claude-code' {
       copied: string
       parkedTick: number
       parkedFlipped: string[]
+      restoredNote: string
+      saveWarning: boolean
+      restoreOffer: { id: string; savedAt: number; topics: number }[]
     }
   }
 }
